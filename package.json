@@ -4,8 +4,7 @@
   "description": "API Scraper untuk DonghuaFilm.com",
   "main": "api/index.js",
   "scripts": {
-    "dev": "vercel dev",
-    "start": "node api/index.js"
+    "dev": "node api/index.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
@@ -14,6 +13,6 @@
     "express": "^4.18.2"
   },
   "engines": {
-    "node": ">=16.x"
+    "node": "18.x"
   }
 }
