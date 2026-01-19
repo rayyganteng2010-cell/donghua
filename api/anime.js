@@ -3,128 +3,60 @@ const router = express.Router();
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-/**
- * GET /anime/:slug - Get anime details and episode list
- * Example: /anime/renegade-immortal
- */
 router.get('/:slug', async (req, res) => {
   try {
-    const slug = req.params.slug;
+    const { slug } = req.params;
     const url = `https://donghuafilm.com/anime/${slug}/`;
+    
+    console.log(`🎭 Fetching anime: ${url}`);
     
     const response = await axios.get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+      },
+      timeout: 15000
     });
     
     const $ = cheerio.load(response.data);
     
-    // Extract anime details
+    // Extract basic info
     const title = $('h1.entry-title').text().trim();
-    const thumbnail = $('.thumb img').attr('src') || 
-                     $('.poster img').attr('src') ||
-                     $('img[itemprop="image"]').attr('src');
-    
-    // Extract synopsis/description
-    let description = '';
-    $('.entry-content p').each((i, el) => {
-      const text = $(el).text().trim();
-      if (text && text.length > 50 && !description) {
-        description = text;
-      }
-    });
-    
-    // Extract metadata
-    const metadata = {};
-    $('.info-content span').each((i, el) => {
-      const text = $(el).text().trim();
-      if (text.includes(':')) {
-        const [key, ...valueParts] = text.split(':');
-        if (key && valueParts.length > 0) {
-          metadata[key.trim()] = valueParts.join(':').trim();
-        }
-      }
-    });
-    
-    // Extract genres
-    const genres = [];
-    $('.genx a').each((i, el) => {
-      genres.push($(el).text().trim());
-    });
+    const thumbnail = $('.thumb img, .poster img, img[itemprop="image"]').attr('src');
     
     // Extract episodes
     const episodes = [];
-    $('.eplister ul li').each((index, element) => {
-      const $el = $(element);
+    $('.eplister li, .episode-list li').each((i, el) => {
+      const $el = $(el);
+      const epUrl = $el.find('a').attr('href');
+      const epTitle = $el.find('.epl-title, .title').text().trim();
+      const epNum = $el.find('.epl-num, .num').text().trim();
       
-      const episodeUrl = $el.find('a').attr('href');
-      const episodeTitle = $el.find('.epl-title').text().trim();
-      const episodeNumber = $el.find('.epl-num').text().trim();
-      const episodeDate = $el.find('.epl-date').text().trim();
-      const episodeThumbnail = $el.find('img').attr('src') || 
-                              $el.find('img').attr('data-src');
-      
-      if (episodeUrl) {
+      if (epUrl) {
         episodes.push({
-          id: episodeUrl.split('/').filter(Boolean).pop() || `ep-${index}`,
-          url: episodeUrl,
-          title: episodeTitle,
-          number: episodeNumber,
-          date: episodeDate,
-          thumbnail: episodeThumbnail,
-          episode: parseInt(episodeNumber.match(/\d+/)?.[0]) || index + 1
+          id: epUrl.split('/').filter(Boolean).pop(),
+          url: epUrl,
+          title: epTitle,
+          number: epNum || `Episode ${i + 1}`,
+          episode: i + 1
         });
       }
     });
     
-    // If no episodes in .eplister, check for other structures
-    if (episodes.length === 0) {
-      $('.episode-list a, .episodes a').each((index, element) => {
-        const $el = $(element);
-        const episodeUrl = $el.attr('href');
-        const episodeText = $el.text().trim();
-        
-        if (episodeUrl && episodeUrl.includes('episode')) {
-          episodes.push({
-            id: episodeUrl.split('/').filter(Boolean).pop(),
-            url: episodeUrl,
-            title: episodeText,
-            number: episodeText.match(/\d+/)?.[0] || `${index + 1}`,
-            episode: index + 1
-          });
-        }
-      });
-    }
-    
     res.json({
       success: true,
-      url,
       anime: {
         slug,
         title,
         thumbnail,
-        description,
-        metadata,
-        genres,
         totalEpisodes: episodes.length
       },
-      episodes: episodes.reverse(), // Latest episodes first
-      totalEpisodes: episodes.length
+      episodes: episodes.reverse(), // Latest first
+      totalEpisodes: episodes.length,
+      scrapedAt: new Date().toISOString()
     });
     
   } catch (error) {
-    console.error('Error fetching anime details:', error.message);
-    
-    // Check if it's a 404 error
-    if (error.response && error.response.status === 404) {
-      return res.status(404).json({
-        success: false,
-        error: 'Anime not found',
-        message: 'The requested anime does not exist'
-      });
-    }
-    
+    console.error('Anime fetch error:', error.message);
     res.status(500).json({
       success: false,
       error: error.message,
