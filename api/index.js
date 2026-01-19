@@ -1,109 +1,93 @@
 const express = require('express');
 const cors = require('cors');
+
+// Inisialisasi app
 const app = express();
 
-// Middleware
+// Middleware SIMPLE
 app.use(cors());
 app.use(express.json());
 
-// Import routes
-const homeRoutes = require('./home');
-const searchRoutes = require('./search');
-const animeRoutes = require('./anime');
-const episodeRoutes = require('./episode');
-
-// Routes
-app.get('/', (req, res) => {
-  // Direct handler untuk home
-  homeRoutes(req, res);
-});
-
-app.get('/search', (req, res) => {
-  searchRoutes(req, res);
-});
-
-app.get('/anime/:slug', (req, res) => {
-  // Load anime routes dynamically
-  animeRoutes(req, res);
-});
-
-app.get('/episode/:slug', (req, res) => {
-  // Load episode routes dynamically
-  episodeRoutes(req, res);
-});
-
-// Health check dengan info detail
+// Health check - TEST DULU INI
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    service: 'DonghuaFilm Scraper API',
-    version: '2.0',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      home: 'GET /',
-      search: 'GET /search?q={query}',
-      anime: 'GET /anime/{slug}',
-      episode: 'GET /episode/{slug}',
-      health: 'GET /health'
-    },
-    stats: {
-      memory: process.memoryUsage(),
-      uptime: process.uptime()
-    }
+  console.log('Health check called');
+  res.json({ 
+    status: 'OK', 
+    message: 'API is working',
+    timestamp: new Date().toISOString()
   });
 });
 
-// Welcome page
-app.get('/info', (req, res) => {
+// Route sederhana untuk testing
+app.get('/', (req, res) => {
+  console.log('Home route called');
   res.json({
-    message: '🎬 DonghuaFilm Scraper API',
-    description: 'Unofficial API for scraping DonghuaFilm.com',
-    features: [
-      'Scrape latest donghua',
-      'Search donghua by title',
-      'Get anime details and episodes',
-      'Get episode video links'
-    ],
-    note: 'This API is for educational purposes only',
-    github: 'https://github.com/yourusername/donghua-api'
+    message: 'DonghuaFilm API v2.0',
+    endpoints: [
+      '/health',
+      '/test',
+      '/search?q=immortal'
+    ]
   });
 });
 
-// Error handling
+// Test route untuk scrape sederhana
+app.get('/test', async (req, res) => {
+  try {
+    const axios = require('axios');
+    const cheerio = require('cheerio');
+    
+    console.log('Testing scrape...');
+    const response = await axios.get('https://donghuafilm.com/', {
+      timeout: 5000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0'
+      }
+    });
+    
+    const $ = cheerio.load(response.data);
+    const titles = [];
+    
+    $('h2 a').each((i, el) => {
+      const title = $(el).text().trim();
+      if (title) titles.push(title);
+    });
+    
+    res.json({
+      success: true,
+      scraped: titles.slice(0, 10),
+      total: titles.length
+    });
+    
+  } catch (error) {
+    console.error('Test error:', error.message);
+    res.json({
+      success: false,
+      error: error.message,
+      note: 'Scraping test failed'
+    });
+  }
+});
+
+// **NANTI tambahkan routes lain setelah ini bekerja**
+
+// Error handler
 app.use((err, req, res, next) => {
-  console.error('🚨 Server Error:', {
-    error: err.message,
-    stack: err.stack,
-    url: req.url,
-    method: req.method
-  });
-  
+  console.error('Error:', err.message);
   res.status(500).json({
     error: 'Internal Server Error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong',
+    details: err.message,
     timestamp: new Date().toISOString()
   });
 });
 
 // 404 handler
-app.use('*', (req, res) => {
+app.use((req, res) => {
   res.status(404).json({
-    error: 'Endpoint not found',
-    requested: req.originalUrl,
-    available_endpoints: [
-      '/',
-      '/search?q={query}',
-      '/anime/{slug}',
-      '/episode/{slug}',
-      '/health',
-      '/info'
-    ],
-    timestamp: new Date().toISOString()
+    error: 'Not Found',
+    path: req.path
   });
 });
 
-// Export untuk Vercel
-module.exports = (req, res) => {
-  console.log(`📥 Incoming: ${req.method} ${req.url}`);
-  return app(req, res);
-};
+// Export untuk Vercel - INI YANG PALING PENTING
+module.exports = app;
