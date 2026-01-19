@@ -1,0 +1,19 @@
+{
+  "name": "donghuafilm-scraper",
+  "version": "1.0.0",
+  "description": "API Scraper untuk DonghuaFilm.com",
+  "main": "api/index.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "node api/index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=16.x"
+  }
+}
