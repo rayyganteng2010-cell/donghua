@@ -1,10 +1,9 @@
 {
-  "name": "donghuafilm-scraper",
+  "name": "donghua-scraper",
   "version": "1.0.0",
-  "description": "API Scraper untuk DonghuaFilm.com",
   "main": "api/index.js",
   "scripts": {
-    "dev": "node api/index.js"
+    "build": "echo 'No build required'"
   },
   "dependencies": {
     "axios": "^1.6.0",
