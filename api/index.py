@@ -1,10 +1,10 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 import requests
 from bs4 import BeautifulSoup
 import re
 
-app = FastAPI(title="Samehadaku Scraper V6")
+app = FastAPI(title="Samehadaku Scraper V7")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -24,38 +24,37 @@ def get_soup(url: str):
         print(f"Error scraping {url}: {e}")
         return None
 
-# --- FUNGSI BANTUAN PARSE ITEM (Biar Rapi & Lengkap) ---
+# --- PARSER ITEM HELPER ---
 def parse_anime_item(node):
-    """Mengambil data detail dari sebuah elemen anime (thumbnail, sinopsis, dll)"""
     try:
         # 1. Title
         title_tag = node.find("div", class_="title") or node.find("a")
-        title = title_tag.get_text(strip=True) if title_tag else "Unknown"
+        if not title_tag: return None
+        title = title_tag.get_text(strip=True)
         
         # 2. Link
         a_tag = node.find("a")
         link = a_tag['href'] if a_tag else "#"
         
-        # 3. Image (Cek Lazyload data-src juga)
+        # 3. Image
         img_tag = node.find("img")
         thumb = None
         if img_tag:
             thumb = img_tag.get('src')
-            if not thumb or "data:image" in thumb: # Handle lazy load
+            if not thumb or "data:image" in thumb: 
                 thumb = img_tag.get('data-src') or img_tag.get('srcset')
-
-        # 4. Score / Rating
+        
+        # 4. Score
         score_tag = node.find("div", class_="score") or node.find("span", class_="score")
         score = score_tag.get_text(strip=True) if score_tag else "?"
         
-        # 5. Sinopsis / Deskripsi
-        # (Biasanya di samehadaku ada di class 'ttls' atau hidden 'desc')
+        # 5. Synopsis (Usahakan cari text tersembunyi)
+        # Class 'ttls' biasanya tooltip hover
         desc = "-"
-        desc_tag = node.find("div", class_="ttls") or node.find("div", class_="desc") or node.find("p")
+        desc_tag = node.find("div", class_="ttls") or node.find("div", class_="desc")
         if desc_tag:
-            # Bersihkan text dari newlines aneh
             desc = desc_tag.get_text(strip=True).replace("\n", " ")
-        
+
         # 6. Genres
         genres = []
         genre_tags = node.select(".genres a") or node.select(".genre a")
@@ -74,141 +73,110 @@ def parse_anime_item(node):
 
 @app.get("/")
 def home():
-    return {"status": "Online", "msg": "Samehadaku API V6 - Schedule English & Complete"}
+    return {"status": "Online", "msg": "Samehadaku API V7 - Schedule Fix"}
 
-# --- 1. JADWAL (ENG & LENGKAP) ---
+# --- LOGIC JADWAL BARU (Targeted Search) ---
 @app.get("/api/schedule")
 def get_schedule():
     soup = get_soup(f"{BASE_URL}/jadwal-rilis/")
-    if not soup: return {"success": False, "message": "Gagal fetch data"}
+    if not soup: return {"success": False}
     
-    # Init structure Hari Inggris
-    schedule_data = {
+    # Template Output Inggris
+    final_schedule = {
         "Monday": [], "Tuesday": [], "Wednesday": [], "Thursday": [], 
         "Friday": [], "Saturday": [], "Sunday": []
     }
     
-    # Mapping dari Indo -> Inggris
-    day_map_en = {
-        "senin": "Monday", "monday": "Monday",
-        "selasa": "Tuesday", "tuesday": "Tuesday",
-        "rabu": "Wednesday", "wednesday": "Wednesday",
-        "kamis": "Thursday", "thursday": "Thursday",
-        "jumat": "Friday", "friday": "Friday",
-        "sabtu": "Saturday", "saturday": "Saturday",
-        "minggu": "Sunday", "sunday": "Sunday"
-    }
+    # Pasangan Nama Hari Indo -> Key Inggris
+    # Kita akan cari satu per satu.
+    day_targets = [
+        ("Senin", "Monday"), ("Selasa", "Tuesday"), ("Rabu", "Wednesday"),
+        ("Kamis", "Thursday"), ("Jumat", "Friday"), ("Sabtu", "Saturday"), 
+        ("Minggu", "Sunday")
+    ]
 
-    # Cari area konten utama biar gak nyasar ke sidebar
-    content_area = soup.find("div", class_="entry-content") or soup.find("div", class_="schedule") or soup
-    
-    # Ambil semua kemungkinan header hari
-    headers = content_area.find_all(["h3", "h4", "div", "span"])
-    
-    current_day_en = None
-    
-    for tag in headers:
-        text_clean = tag.get_text(strip=True).lower()
+    for indo_day, eng_key in day_targets:
+        # 1. Cari elemen header yang TULISANNYA nama hari (Case Insensitive)
+        # Kita cari tag h3, h4, span, atau div
+        day_header = soup.find(lambda tag: tag.name in ['h3', 'h4', 'div', 'span'] and tag.get_text(strip=True).lower() == indo_day.lower())
         
-        # Cek apakah teks elemen ini adalah Nama Hari
-        found_day = None
-        for k, v in day_map_en.items():
-            if k in text_clean:
-                found_day = v
-                break
-        
-        if found_day:
-            current_day_en = found_day
+        if day_header:
+            items_found = []
             
-            # --- LOGIC RAKUS (Greedy Fetch) ---
-            # Kita cari elemen sibling SETELAH header hari ini, sampai ketemu header hari berikutnya.
-            # Ini memastikan kalau ada banyak anime, semuanya keambil.
+            # STRATEGI 1: Cari Parent Box (Container)
+            # Biasanya Header dan List Anime dibungkus div yang sama (misal class="schedule-box")
+            parent_box = day_header.find_parent("div", class_="schedule-box") or day_header.find_parent("div", class_="tab-pane")
             
-            curr = tag.find_next_sibling()
+            if parent_box:
+                # Ambil semua animepost di dalam box ini
+                raw_items = parent_box.select(".animepost") or parent_box.select("li")
+                for item in raw_items:
+                    parsed = parse_anime_item(item)
+                    if parsed: items_found.append(parsed)
             
-            while curr:
-                # Stop kalau ketemu Header Hari Berikutnya (misal ketemu "Selasa" pas lagi scan "Senin")
-                if curr.name in ["h3", "h4"] and any(d in curr.get_text(strip=True).lower() for d in day_map_en):
-                    break
-                
-                items = []
-                
-                # Tipe 1: Grid View (Ada gambar & sinopsis - class animepost)
-                if curr.name == "div" and ("animepost" in curr.get("class", []) or curr.find("div", class_="animepost")):
-                    posts = curr.select(".animepost") if "animepost" not in curr.get("class", []) else [curr]
-                    for post in posts:
-                        parsed = parse_anime_item(post)
-                        if parsed: items.append(parsed)
+            # STRATEGI 2: Kalau ga punya parent khusus, ambil Sibling (Elemen sebelahnya)
+            else:
+                next_elem = day_header.find_next_sibling()
+                # Cek apakah siblingnya adalah list atau wrapper anime
+                if next_elem:
+                     raw_items = next_elem.select(".animepost") or next_elem.find_all("li")
+                     for item in raw_items:
+                        parsed = parse_anime_item(item)
+                        if parsed: items_found.append(parsed)
 
-                # Tipe 2: List View (ul/li - biasanya cuma link text)
-                elif curr.name == "ul":
-                    for li in curr.find_all("li"):
-                        parsed = parse_anime_item(li)
-                        if parsed: items.append(parsed)
+            # Masukkan ke dictionary final
+            # Filter duplikat (kadang HTML ada item ganda)
+            seen_titles = set()
+            for item in items_found:
+                if item['title'] not in seen_titles:
+                    final_schedule[eng_key].append(item)
+                    seen_titles.add(item['title'])
 
-                # Tipe 3: Div Wrapper Biasa
-                elif curr.name == "div":
-                    # Cek dalemnya ada list atau animepost
-                    sub_posts = curr.select(".animepost")
-                    if sub_posts:
-                        for p in sub_posts: 
-                            parsed = parse_anime_item(p)
-                            if parsed: items.append(parsed)
-                    else:
-                        # Coba cari list biasa
-                        sub_lis = curr.select("li")
-                        for l in sub_lis:
-                            parsed = parse_anime_item(l)
-                            if parsed: items.append(parsed)
+    return JSONResponse(content={"success": True, "data": final_schedule})
 
-                # Masukkan ke dictionary jadwal
-                for item in items:
-                    # Filter duplikat (kadang ada item double di HTML)
-                    if not any(x['title'] == item['title'] for x in schedule_data[current_day_en]):
-                        schedule_data[current_day_en].append(item)
-                
-                # Lanjut ke elemen html berikutnya
-                curr = curr.find_next_sibling()
 
-    return JSONResponse(content={"success": True, "data": schedule_data})
-
-# --- 2. LATEST (SELECTOR DIPERTAJAM DARI VERSI SEBELUMNYA) ---
+# --- LATEST (Tetap Pakai yang V6 karena sudah bagus) ---
 @app.get("/api/latest")
 def get_latest():
     soup = get_soup(f"{BASE_URL}/anime-terbaru/")
     if not soup: return {"success": False}
-    
     data = []
-    # Selector target: List item di dalam post-show atau animepost umum
+    
     posts = soup.select(".post-show li") or soup.select(".animepost") or soup.select("div.post-article")
-
     for post in posts:
-        parsed = parse_anime_item(post) # Pakai fungsi helper yang sama biar konsisten
+        parsed = parse_anime_item(post)
         if parsed:
-            # Tambahan khusus latest: Info Episode & Posted Time
+            # Tambahan data khusus latest
             ep_tag = post.find("span", class_="episode") or post.find("div", class_="dtla")
             parsed['episode'] = ep_tag.get_text(strip=True) if ep_tag else "New"
-            
             date_tag = post.find("span", class_="date") or post.find("span", class_="year")
             parsed['posted'] = date_tag.get_text(strip=True) if date_tag else "?"
-            
             data.append(parsed)
             
     return JSONResponse(content={"success": True, "data": data})
 
-# --- 3. DETAIL (TETAP SAMA) ---
+# --- SEARCH ---
+@app.get("/api/search")
+def search_anime(query: str):
+    soup = get_soup(f"{BASE_URL}/?s={query}")
+    data = []
+    if soup:
+        items = soup.select(".animepost") or soup.select("div.relat article")
+        for item in items:
+            parsed = parse_anime_item(item)
+            if parsed: data.append(parsed)
+    return {"success": True, "results": data}
+
+# --- DETAIL ---
 @app.get("/api/detail")
 def get_detail(url: str):
     soup = get_soup(url)
     if not soup: return {"success": False}
-    
     result = {}
     try:
         result['title'] = soup.find("h1", class_="entry-title").get_text(strip=True)
-        
         rating_tag = soup.find("span", class_="rating") or soup.find("div", class_="score")
         result['rating'] = rating_tag.get_text(strip=True) if rating_tag else "N/A"
-        
         desc_div = soup.find("div", class_="desc") or soup.find("div", class_="entry-content")
         result['description'] = desc_div.get_text(strip=True) if desc_div else "-"
         
@@ -223,7 +191,6 @@ def get_detail(url: str):
 
         episodes = []
         ep_list = soup.select(".lstepsiode li") or soup.select(".eps_lst li")
-        
         for li in ep_list:
             ep_num = li.find("span", class_="epnum")
             link_tag = li.find("a")
@@ -235,23 +202,8 @@ def get_detail(url: str):
                 "date": date_tag.get_text(strip=True) if date_tag else "-"
             })
         result['episodes'] = episodes
-        
         iframe = soup.find("iframe")
         result['stream_url'] = iframe['src'] if iframe else None
-
     except Exception as e:
          return {"success": False, "error": str(e)}
-
     return JSONResponse(content={"success": True, "result": result})
-
-# --- 4. SEARCH ---
-@app.get("/api/search")
-def search_anime(query: str):
-    soup = get_soup(f"{BASE_URL}/?s={query}")
-    data = []
-    if soup:
-        items = soup.select(".animepost")
-        for item in items:
-            parsed = parse_anime_item(item)
-            if parsed: data.append(parsed)
-    return {"success": True, "results": data}
