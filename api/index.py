@@ -1,217 +1,150 @@
-from flask import Flask, jsonify, request
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 import requests
 from bs4 import BeautifulSoup
-import json
-import re
 
-app = Flask(__name__)
+app = FastAPI(title="Samehadaku Scraper API", docs_url="/", redoc_url=None)
 
-# --- CONFIG SESSION DARI URL LU ---
-# Session ID yang lu kasih di URL
-USER_SESSION_ID = "73d069f57044172d83509a511098650e1dd8c1467092a0ea0"
-
-# Headers dimiripin sama browser Android
+# Headers biar gak dikira bot jahat
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    "Referer": "https://www.viu.com/",
-    "Origin": "https://www.viu.com",
-    "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-    "X-Requested-With": "com.viu.phone"  # Kadang ini ngebantu bypass
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
 
-# Cookies wajib injek session
-COOKIES = {
-    "vusess": USER_SESSION_ID,
-    "language_flag": "id",
-    "country_flag": "id"
-}
+BASE_URL = "https://v1.samehadaku.how"
 
-def fetch_viu_page(url):
-    """
-    Request ke Viu dengan full atribut session & cookies
-    """
+def get_soup(url):
     try:
-        # Kita tambahkan parameter session_id juga di URL biar double-protection
-        params = {
-            "session_id": USER_SESSION_ID,
-            "partnerId": "7",
-            "chargingPlatform": "frontend_wap",
-            "redirectedFromHE": "true"
-        }
-        
-        response = requests.get(
-            url, 
-            headers=HEADERS, 
-            cookies=COOKIES, 
-            params=params, 
-            timeout=15
-        )
-        return response
+        req = requests.get(url, headers=HEADERS)
+        req.raise_for_status()
+        return BeautifulSoup(req.text, "lxml")
     except Exception as e:
-        print(f"Connection Error: {e}")
-        return None
+        raise HTTPException(status_code=500, detail=f"Error scraping: {str(e)}")
 
-def extract_next_data(html_content):
-    """
-    Ekstrak JSON __NEXT_DATA__
-    """
-    try:
-        soup = BeautifulSoup(html_content, 'html.parser')
-        script = soup.find('script', {'id': '__NEXT_DATA__'})
-        if script:
-            return json.loads(script.string)
-    except:
-        pass
-    return None
-
-@app.route('/')
-def home():
-    return jsonify({
-        "status": "Viu Session Scraper Active",
-        "session_used": USER_SESSION_ID[:10] + "...",
-        "endpoints": {
-            "search": "/api/search?q=keyword",
-            "detail": "/api/detail?url=https://www.viu.com/ott/id/id/vod/...",
-            "debug": "/api/debug?url=https://www.viu.com/..." 
-        }
-    })
-
-@app.route('/api/search')
-def search():
-    query = request.args.get('q')
-    if not query:
-        return jsonify({"error": "Parameter 'q' is required"}), 400
+@app.get("/api/anime-list")
+def get_anime_list():
+    """Scrape daftar anime: Thumbnail, Rating, Title"""
+    url = f"{BASE_URL}/daftar-anime-2/"
+    soup = get_soup(url)
     
-    # URL Search Viu
-    target_url = f"https://www.viu.com/ott/id/id/search?keyword={query}"
+    data = []
+    # NOTE: Ganti selector '.animepost' sesuai class asli di web jika berubah
+    anime_nodes = soup.find_all("div", class_="animepost") 
     
-    response = fetch_viu_page(target_url)
-    if not response or response.status_code != 200:
-        return jsonify({"error": "Failed to fetch search page", "status_code": response.status_code if response else "Error"}), 500
-
-    data = extract_next_data(response.text)
-    results = []
-    
-    if data:
+    for node in anime_nodes:
         try:
-            # Navigasi JSON Viu
-            items = data['props']['pageProps']['initialData']['data']['result']
-            for item in items:
-                # Ambil ID dan Slug
-                vid_id = item.get('id')
-                slug = item.get('slug', 'video')
-                
-                if vid_id:
-                    full_url = f"https://www.viu.com/ott/id/id/vod/{vid_id}/{slug}"
-                    results.append({
-                        "title": item.get('title'),
-                        "id": vid_id,
-                        "url": full_url,
-                        "thumbnail": item.get('cover_image_url'),
-                        "is_premium": item.get('is_movie') # 1 = premium, 0 = free
-                    })
-        except KeyError:
-            pass
-
-    return jsonify({"query": query, "results": results})
-
-@app.route('/api/detail')
-def detail():
-    target_url = request.args.get('url')
-    if not target_url:
-        return jsonify({"error": "Parameter 'url' is required"}), 400
-
-    response = fetch_viu_page(target_url)
-    if not response:
-        return jsonify({"error": "Connection failed"}), 500
-
-    data = extract_next_data(response.text)
-    
-    if not data:
-        # Jika gagal ambil JSON, kemungkinan kena blokir atau halaman error
-        soup = BeautifulSoup(response.text, 'html.parser')
-        title = soup.title.string if soup.title else "No Title"
-        return jsonify({
-            "error": "Failed to parse NEXT_DATA", 
-            "page_title_received": title,
-            "hint": "Check /api/debug to see raw HTML"
-        }), 500
-
-    res_data = {
-        "title": "Unknown",
-        "desc": "",
-        "episodes": []
-    }
-
-    try:
-        page_data = data['props']['pageProps']['data']
-        current = page_data.get('current_product', {})
-        series_list = page_data.get('series_product', [])
-
-        res_data['title'] = current.get('title')
-        res_data['desc'] = current.get('description')
-        res_data['synopsis'] = current.get('synopsis')
-        res_data['img'] = current.get('cover_image_url')
-
-        # Masukkan Episode Current
-        if current.get('id'):
-             res_data['episodes'].append({
-                "no": current.get('number'),
-                "title": current.get('subtitle'),
-                "id": current.get('id'),
-                "url": target_url
+            title = node.find("div", class_="title").get_text(strip=True)
+            # Ambil rating
+            rating = node.find("div", class_="score").get_text(strip=True) if node.find("div", class_="score") else "N/A"
+            # Ambil image
+            img_tag = node.find("img")
+            thumb = img_tag['src'] if img_tag else None
+            # Ambil link detail
+            link = node.find("a")['href']
+            
+            data.append({
+                "title": title,
+                "rating": rating,
+                "thumbnail": thumb,
+                "link": link
             })
+        except AttributeError:
+            continue
+            
+    return JSONResponse(content={"status": "success", "data": data})
 
-        # Masukkan Episode Lainnya
-        for ep in series_list:
-            if ep.get('id') != current.get('id'):
-                ep_url = f"https://www.viu.com/ott/id/id/vod/{ep.get('id')}/{ep.get('slug')}"
-                res_data['episodes'].append({
-                    "no": ep.get('number'),
-                    "title": ep.get('subtitle'),
-                    "id": ep.get('id'),
-                    "url": ep_url
-                })
+@app.get("/api/schedule")
+def get_schedule():
+    """Scrape jadwal rilis (Senin-Minggu)"""
+    url = f"{BASE_URL}/jadwal-rilis/"
+    soup = get_soup(url)
+    
+    schedule = {}
+    # Biasanya struktur jadwal itu per kotak hari
+    # Cari container jadwal, misal class 'schedule-section' atau loop div
+    schedule_nodes = soup.find_all("div", class_="schedule-box") # Sesuaikan selector
+    
+    if not schedule_nodes:
+        # Fallback logic kalo structure beda, misal pake tab
+        schedule_nodes = soup.select(".tab-pane") # Contoh selector tab bootstrap
+
+    for node in schedule_nodes:
+        day_name = node.find("h3").get_text(strip=True) if node.find("h3") else "Unknown"
+        anime_list = []
+        for anime in node.find_all("li"): # Asumsi list item
+            title = anime.get_text(strip=True)
+            anime_list.append(title)
         
-        # Sort episode
-        res_data['episodes'].sort(key=lambda x: int(x['no']) if x['no'] and str(x['no']).isdigit() else 9999)
+        schedule[day_name] = anime_list
 
-    except Exception as e:
-        res_data['error_trace'] = str(e)
+    return JSONResponse(content={"status": "success", "data": schedule})
 
-    return jsonify(res_data)
+@app.get("/api/latest")
+def get_latest_anime():
+    """Scrape anime terbaru"""
+    url = f"{BASE_URL}/anime-terbaru/"
+    soup = get_soup(url)
+    
+    data = []
+    # Biasanya di homepage atau page terbaru strukturnya mirip 'post-article'
+    posts = soup.find_all("div", class_="post-article") 
+    
+    for post in posts:
+        try:
+            title = post.find("h3", class_="title").get_text(strip=True)
+            episode = post.find("span", class_="episode").get_text(strip=True)
+            thumb = post.find("img")['src']
+            link = post.find("a")['href']
+            
+            data.append({
+                "title": title,
+                "episode": episode,
+                "thumbnail": thumb,
+                "link": link
+            })
+        except:
+            continue
 
-@app.route('/api/debug')
-def debug():
+    return JSONResponse(content={"status": "success", "data": data})
+
+@app.get("/api/detail")
+def get_anime_detail(url: str):
     """
-    Gunakan ini kalau 'Search' atau 'Detail' masih kosong resultnya.
-    Ini akan nampilin apa yang sebenarnya dilihat oleh server Vercel.
+    Scrape detail anime.
+    Param url: Link full anime (e.g., https://v1.samehadaku.how/anime/compass...)
     """
-    target_url = request.args.get('url')
-    if not target_url:
-        target_url = "https://www.viu.com/ott/id/id/all"
+    soup = get_soup(url)
     
-    response = fetch_viu_page(target_url)
+    # 1. Info Dasar
+    info_div = soup.find("div", class_="infox") # Class umum info
+    synopsis = soup.find("div", class_="desc").get_text(strip=True) if soup.find("div", class_="desc") else "No desc"
     
-    if not response:
-        return "Failed to connect"
+    # 2. Ambil Video/Server (Disini tricky, biasanya iframe)
+    # Kita ambil src iframe nya aja
+    video_servers = []
+    server_nodes = soup.select("#server-list li") # Contoh ID server list
+    
+    for server in server_nodes:
+        server_name = server.get_text(strip=True)
+        # Link video mungkin ada di atribut data-video atau dalam tag a
+        video_url = server.get("data-video") 
+        if video_url:
+             video_servers.append({"server": server_name, "url": video_url})
 
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
-    # Cek Title Halaman
-    page_title = soup.title.string if soup.title else "No Title"
-    
-    # Cek apakah ada teks 'Location' atau 'Region' (Tanda kena blokir)
-    text_content = soup.get_text()[:500] 
-    
-    return jsonify({
-        "status_code": response.status_code,
-        "page_title": page_title,
-        "final_url": response.url,
-        "content_snippet": text_content,
-        "headers_sent": dict(response.request.headers),
-        "cookies_sent": dict(response.request._cookies)
-    })
+    # 3. List Episode
+    episodes = []
+    ep_list = soup.find("div", class_="lstepsiode") # Class list episode
+    if ep_list:
+        for li in ep_list.find_all("li"):
+            ep_num = li.find("span", class_="epnum").get_text(strip=True)
+            ep_link = li.find("a")['href']
+            episodes.append({"episode": ep_num, "link": ep_link})
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    result = {
+        "title": soup.find("h1", class_="entry-title").get_text(strip=True),
+        "synopsis": synopsis,
+        "video_servers": video_servers, # Ini mungkin perlu decrypt kalau diprotect
+        "episodes": episodes
+    }
+    
+    return JSONResponse(content={"status": "success", "data": result})
+
