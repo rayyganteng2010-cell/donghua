@@ -1,47 +1,45 @@
 from flask import Flask, jsonify, request
-import cloudscraper
+import requests
 from bs4 import BeautifulSoup
+import json
 import re
 
 app = Flask(__name__)
 
-# Base URL target
-BASE_URL = "https://dracin.io"
-
-# Inisialisasi Scraper dengan User-Agent Android agar dianggap HP
-scraper = cloudscraper.create_scraper(
-    browser={
-        'browser': 'chrome',
-        'platform': 'android',
-        'desktop': False
-    }
-)
-
-# Jika cloudscraper gagal set user-agent spesifik, kita paksa di header
+# Base Headers (Penting biar dianggap browser PC/HP)
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    "Referer": BASE_URL
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://www.viu.com/",
+    "Origin": "https://www.viu.com"
 }
 
-def get_soup(url):
+def get_next_data(url):
+    """
+    Fungsi sakti untuk mengambil JSON '__NEXT_DATA__' dari situs Next.js seperti Viu.
+    """
     try:
-        # Menggunakan scraper.get untuk bypass cloudflare ringan
-        response = scraper.get(url, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        return BeautifulSoup(response.text, 'html.parser')
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        if response.status_code != 200:
+            return None
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Cari tag script dengan id __NEXT_DATA__
+        script = soup.find('script', {'id': '__NEXT_DATA__'})
+        if script:
+            return json.loads(script.string)
+        return None
     except Exception as e:
-        print(f"Error fetching {url}: {e}")
+        print(f"Error: {e}")
         return None
 
 @app.route('/')
 def home():
     return jsonify({
-        "status": "Online",
-        "mode": "Cloudscraper + Regex Mode",
+        "status": "Viu Scraper Running",
         "endpoints": {
             "search": "/api/search?q=keyword",
-            "detail": "/api/detail?url=https://dracin.io/drama/...",
-            "watch": "/api/watch?url=https://dracin.io/watch/..."
+            "detail": "/api/detail?url=https://www.viu.com/ott/id/id/vod/..."
         }
     })
 
@@ -51,64 +49,42 @@ def search():
     if not query:
         return jsonify({"error": "Parameter 'q' is required"}), 400
     
-    # URL Search
-    search_url = f"{BASE_URL}/search?q={query}"
-    soup = get_soup(search_url)
+    # URL Search Viu
+    target_url = f"https://www.viu.com/ott/id/id/search?keyword={query}"
+    data = get_next_data(target_url)
     
     results = []
-    seen_urls = set()
-
-    if soup:
-        # LOGIKA BARU: Cari SEMUA tag <a> yang punya href mengandung '/drama/'
-        # Ini tidak peduli class css-nya apa, jadi lebih anti-gagal.
-        all_links = soup.find_all('a', href=True)
-        
-        for link in all_links:
-            href = link.get('href')
-            
-            # Filter hanya link drama
-            if '/drama/' in href:
-                full_url = href if href.startswith('http') else f"{BASE_URL}{href}"
-                
-                # Hindari duplikat
-                if full_url in seen_urls:
-                    continue
-                seen_urls.add(full_url)
-
-                # Coba cari judul dan gambar di dalam tag <a> tersebut atau parent-nya
-                # Biasanya struktur: <a> <img src="..."> <div>Judul</div> </a>
-                title = link.get_text(strip=True)
-                
-                # Jika text kosong, mungkin judul ada di atribut title atau alt gambar
-                img_tag = link.find('img')
-                thumbnail = None
-                
-                if img_tag:
-                    thumbnail = img_tag.get('src')
-                    if not title:
-                        title = img_tag.get('alt', 'No Title')
-                
-                # Jika masih tidak ada title, coba cari di parent container
-                if not title:
-                    parent = link.find_parent()
-                    if parent:
-                        title = parent.get_text(strip=True)
-
-                # Bersihkan title jika terlalu panjang/kotor
-                if len(title) > 100: 
-                    title = title[:100] + "..."
-
-                results.append({
-                    "title": title,
-                    "url": full_url,
-                    "thumbnail": thumbnail
-                })
     
-    return jsonify({
-        "query": query, 
-        "count": len(results), 
-        "results": results
-    })
+    if data:
+        try:
+            # Jalur data Viu (bisa berubah, tapi biasanya pola ini bertahan lama)
+            # props -> pageProps -> initialData -> data -> result
+            search_results = data['props']['pageProps']['initialData']['data']['result']
+            
+            for item in search_results:
+                # Kita cari yang tipenya 'vod' (Video) atau 'series'
+                # Viu mencampur hasil search (ada category, ada clip, ada full movie)
+                if 'id' in item and 'title' in item:
+                    # Construct URL
+                    # Format: /ott/id/id/vod/{id}/{slug}
+                    vid_id = item.get('id')
+                    slug = item.get('slug', 'video')
+                    full_url = f"https://www.viu.com/ott/id/id/vod/{vid_id}/{slug}"
+                    
+                    # Image URL (Viu biasanya punya beberapa ukuran)
+                    img_url = item.get('cover_image_url')
+                    
+                    results.append({
+                        "title": item.get('title'),
+                        "id": vid_id,
+                        "url": full_url,
+                        "description": item.get('description'),
+                        "thumbnail": img_url
+                    })
+        except KeyError:
+            pass
+
+    return jsonify({"query": query, "count": len(results), "results": results})
 
 @app.route('/api/detail')
 def detail():
@@ -116,85 +92,68 @@ def detail():
     if not target_url:
         return jsonify({"error": "Parameter 'url' is required"}), 400
 
-    soup = get_soup(target_url)
-    if not soup:
-        return jsonify({"error": "Failed to fetch detail or blocked"}), 500
+    data = get_next_data(target_url)
+    if not data:
+        return jsonify({"error": "Failed to fetch data or blocked"}), 500
 
-    data = {
+    result = {
         "title": "Unknown",
-        "description": "No description found",
-        "episodes": []
+        "description": "",
+        "episodes": [],
+        "stream_info": "Not available directly"
     }
 
-    # Ambil Judul (Cari H1 pertama)
-    h1 = soup.find('h1')
-    if h1:
-        data['title'] = h1.get_text(strip=True)
-
-    # Ambil Deskripsi (Cari tag p atau div yang panjang teksnya lumayan)
-    paragraphs = soup.find_all(['p', 'div'])
-    for p in paragraphs:
-        text = p.get_text(strip=True)
-        # Asumsi deskripsi biasanya lebih dari 50 karakter tapi kurang dari 1000
-        if 50 < len(text) < 1000 and "Sinopsis" not in text:
-            data['description'] = text
-            break
-
-    # Ambil Episode (Cari semua link yang mengandung '/watch/')
-    ep_links = soup.find_all('a', href=True)
-    seen_eps = set()
-    
-    for link in ep_links:
-        href = link.get('href')
-        if '/watch/' in href:
-            full_ep_url = href if href.startswith('http') else f"{BASE_URL}{href}"
+    try:
+        # Mengambil metadata utama dari pageProps
+        current_product = data['props']['pageProps']['data']['current_product']
+        series_product = data['props']['pageProps']['data'].get('series_product', [])
+        
+        result['title'] = current_product.get('title')
+        result['description'] = current_product.get('description')
+        result['synopsis'] = current_product.get('synopsis')
+        result['cover'] = current_product.get('cover_image_url')
+        
+        # MENGAMBIL LIST EPISODE
+        # Di Viu, list episode lain biasanya ada di 'series_product'
+        # Atau jika ini adalah halaman episode, 'current_product' adalah episode itu sendiri.
+        
+        # Masukkan episode yang sedang aktif (current)
+        if current_product:
+            result['episodes'].append({
+                "episode_number": current_product.get('number'),
+                "title": current_product.get('subtitle'),
+                "id": current_product.get('id'),
+                "url": target_url, # URL halaman ini
+                "is_premium": current_product.get('is_movie', 0) == 1 # Indikator kasar
+            })
             
-            if full_ep_url not in seen_eps:
-                seen_eps.add(full_ep_url)
-                ep_name = link.get_text(strip=True)
-                # Fallback nama episode
-                if not ep_name:
-                    ep_name = f"Episode {len(seen_eps)}"
-                
-                data['episodes'].append({
-                    "episode": ep_name,
-                    "url": full_ep_url
+        # Masukkan episode lainnya dari list series
+        for ep in series_product:
+            # Hindari duplikat dengan current product
+            if ep.get('id') != current_product.get('id'):
+                ep_url = f"https://www.viu.com/ott/id/id/vod/{ep.get('id')}/{ep.get('slug')}"
+                result['episodes'].append({
+                    "episode_number": ep.get('number'),
+                    "title": ep.get('subtitle'),
+                    "id": ep.get('id'),
+                    "url": ep_url,
+                    "is_premium": ep.get('is_movie', 0) == 1
                 })
+        
+        # Sort episode biar rapi (1, 2, 3...)
+        # Kadang 'number' itu string kosong, jadi perlu handle error
+        result['episodes'].sort(key=lambda x: int(x['episode_number']) if x['episode_number'] and str(x['episode_number']).isdigit() else 9999)
 
-    return jsonify(data)
+    except Exception as e:
+        result['error_parsing'] = str(e)
 
-@app.route('/api/watch')
-def watch():
-    target_url = request.args.get('url')
-    if not target_url:
-        return jsonify({"error": "Parameter 'url' is required"}), 400
+    return jsonify(result)
 
-    soup = get_soup(target_url)
-    if not soup:
-        return jsonify({"error": "Failed to fetch watch page"}), 500
-
-    video_data = {
-        "original_url": target_url,
-        "streams": []
-    }
-
-    # Teknik 1: Cari tag Iframe (paling umum di situs dracin)
-    iframes = soup.find_all('iframe')
-    for iframe in iframes:
-        src = iframe.get('src')
-        if src:
-            video_data['streams'].append({"type": "iframe", "url": src})
-
-    # Teknik 2: Cari Script yang mengandung .m3u8 atau .mp4
-    scripts = soup.find_all('script')
-    for script in scripts:
-        if script.string:
-            # Regex untuk url m3u8/mp4
-            urls = re.findall(r'(https?://[^\s"\']+\.(?:m3u8|mp4))', script.string)
-            for url in urls:
-                 video_data['streams'].append({"type": "direct_stream", "url": url})
-
-    return jsonify(video_data)
+# Note untuk Streaming:
+# Viu menggunakan API internal untuk generate link streaming (.m3u8) yang memiliki token.
+# API itu butuh parameter seperti 'appid', 'platform_flag', 'r' (random), dll.
+# Mengambil raw mp4 dari sisi server Vercel sangat sulit karena Geo-Blocking dan Token Auth.
+# Disarankan hanya mengambil metadata & list episode, lalu biarkan frontend user membuka link aslinya.
 
 if __name__ == '__main__':
     app.run(debug=True)
