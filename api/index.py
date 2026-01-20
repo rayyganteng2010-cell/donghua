@@ -1,10 +1,10 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 import requests
 from bs4 import BeautifulSoup
 import re
 
-app = FastAPI(title="Samehadaku API Final Suite")
+app = FastAPI(title="Samehadaku API V15 - All In One")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -75,85 +75,265 @@ def get_pagination(soup, current_page):
         "totalPages": total_pages
     }
 
-# --- ENDPOINT 1: GENRES ---
-@app.get("/anime/samehadaku/genres/{genre_id}")
-def get_anime_by_genre(genre_id: str, page: int = 1):
-    url = f"{BASE_URL}/genre/{genre_id}/page/{page}/"
-    if page == 1: url = f"{BASE_URL}/genre/{genre_id}/"
-    
-    soup = get_soup(url)
-    if not soup: return JSONResponse({"status": "failed", "message": "Genre not found"}, 404)
-    
-    anime_list = []
-    nodes = soup.select(".animepost")
-    for node in nodes:
-        try:
-            a_tag = node.find("a")
-            if not a_tag: continue
+def parse_anime_item_standard(node):
+    """Helper untuk list anime umum (Search, Schedule, Ongoing)"""
+    try:
+        a_tag = node.find("a")
+        if not a_tag: return None
+        
+        real_url = a_tag['href']
+        anime_id = extract_id(real_url)
+        title = node.find("div", class_="title").get_text(strip=True) if node.find("div", class_="title") else a_tag.get("title")
+        
+        # Tooltip Mining (Buat data yg hidden)
+        score = "?"
+        type_anime = "TV"
+        
+        # Cek hidden tooltip
+        tooltip = node.find("div", class_="ttls") or node.find("div", class_="dtla") or node.find("div", class_="entry-content")
+        if tooltip:
+            text = tooltip.get_text(" | ", strip=True)
+            m_score = re.search(r'(?:Skor|Score)\s*:\s*([\d\.]+)', text, re.I)
+            if m_score: score = m_score.group(1)
             
-            real_url = a_tag['href']
-            anime_id = extract_id(real_url)
+            # Type kadang ada di type tag atau tooltip
+            m_type = re.search(r'(?:Type|Tipe)\s*:\s*(\w+)', text, re.I)
+            if m_type: type_anime = m_type.group(1)
+        
+        # Fallback cari tag visual
+        if score == "?":
+            sc_tag = node.find("div", class_="score")
+            if sc_tag: score = sc_tag.get_text(strip=True)
             
-            score = "?"
-            score_tag = node.find("div", class_="score")
-            if score_tag: score = score_tag.get_text(strip=True)
-            
-            anime_list.append({
-                "title": node.find("div", class_="title").get_text(strip=True),
-                "poster": extract_poster(node),
-                "score": score,
-                "animeId": anime_id,
-                "href": f"/anime/samehadaku/anime/{anime_id}",
-                "genreList": parse_genre_list(node)
-            })
-        except: continue
+        tp_tag = node.find("div", class_="type")
+        if tp_tag: type_anime = tp_tag.get_text(strip=True)
 
-    return JSONResponse({
-        "status": "success",
-        "data": { "animeList": anime_list },
-        "pagination": get_pagination(soup, page)
-    })
+        return {
+            "title": title,
+            "poster": extract_poster(node),
+            "score": score,
+            "type": type_anime,
+            "animeId": anime_id,
+            "href": f"/anime/samehadaku/anime/{anime_id}",
+            "samehadakuUrl": real_url,
+            "genreList": parse_genre_list(node)
+        }
+    except: return None
 
-# --- ENDPOINT 2: BATCH LIST ---
-@app.get("/anime/samehadaku/batch")
-def get_batch_list(page: int = 1):
-    url = f"{BASE_URL}/daftar-batch/page/{page}/"
-    if page == 1: url = f"{BASE_URL}/daftar-batch/"
+@app.get("/")
+def home():
+    return {"message": "Samehadaku API V15 - All Endpoints Included"}
+
+# ==========================================
+# 1. SEARCH ENDPOINT (YANG HILANG TADI)
+# ==========================================
+@app.get("/anime/samehadaku/search")
+def search_anime(query: str, page: int = 1):
+    # Search query
+    url = f"{BASE_URL}/page/{page}/?s={query}"
+    if page == 1: url = f"{BASE_URL}/?s={query}"
     
     soup = get_soup(url)
     if not soup: return JSONResponse({"status": "failed"}, 500)
     
-    batch_list = []
+    results = []
     nodes = soup.select(".animepost")
     for node in nodes:
-        try:
-            a_tag = node.find("a")
-            if not a_tag: continue
-            real_url = a_tag['href']
-            batch_id = extract_id(real_url)
+        item = parse_anime_item_standard(node)
+        if item: results.append(item)
             
-            batch_list.append({
-                "title": node.find("div", class_="title").get_text(strip=True),
-                "poster": extract_poster(node),
-                "batchId": batch_id,
-                "href": f"/anime/samehadaku/batch/{batch_id}", # Kalau mau detail batch bisa ditambah endpoint baru
-                "samehadakuUrl": real_url,
-                "genreList": parse_genre_list(node)
-            })
-        except: continue
-        
     return JSONResponse({
         "status": "success",
-        "data": { "batchList": batch_list },
+        "data": { "animeList": results },
         "pagination": get_pagination(soup, page)
     })
 
-# --- ENDPOINT 3: ANIME DETAIL ---
+# ==========================================
+# 2. SCHEDULE ENDPOINT (LOGIC V11 DIKEMBALIKAN)
+# ==========================================
+@app.get("/anime/samehadaku/schedule")
+def get_schedule():
+    soup = get_soup(f"{BASE_URL}/jadwal-rilis/")
+    if not soup: return JSONResponse({"status": "failed"}, 500)
+    
+    # List Hari Urut
+    day_mapping = [
+        ("Monday", "Senin"), ("Tuesday", "Selasa"), ("Wednesday", "Rabu"),
+        ("Thursday", "Kamis"), ("Friday", "Jumat"), ("Saturday", "Sabtu"), ("Sunday", "Minggu")
+    ]
+    days_result = []
+    
+    content = soup.find("div", class_="entry-content") or soup.find("main") or soup
+
+    for eng_day, indo_day in day_mapping:
+        anime_list = []
+        # Cari Header Hari
+        header = content.find(lambda tag: tag.name in ['h3', 'h4', 'div', 'span'] and indo_day.lower() == tag.get_text(strip=True).lower())
+        
+        if header:
+            # Cari Container Anime (Next Sibling Logic V11)
+            curr = header.find_next_sibling()
+            limit = 0
+            while curr and limit < 4:
+                if ("animepost" in str(curr)) or (curr.name == "ul"):
+                    raw_items = curr.select(".animepost") or curr.select("li")
+                    for item in raw_items:
+                        # Parse khusus schedule (butuh estimation time dari tooltip)
+                        data = parse_anime_item_standard(item)
+                        if data:
+                            # Tambahin field estimation khusus schedule
+                            estimation = "Update"
+                            tooltip = item.find("div", class_="ttls") or item.find("div", class_="dtla")
+                            if tooltip:
+                                text = tooltip.get_text(" | ", strip=True)
+                                m_time = re.search(r'(?:Pukul|Jam|Time|Rilis)\s*:\s*([^|]+)', text, re.I)
+                                if m_time: estimation = m_time.group(1).strip()
+                            
+                            data['estimation'] = estimation
+                            # Filter duplicate
+                            if data['title'] not in [x['title'] for x in anime_list]:
+                                anime_list.append(data)
+                    if anime_list: break
+                curr = curr.find_next_sibling()
+                limit += 1
+
+        days_result.append({
+            "day": eng_day,
+            "animeList": anime_list
+        })
+
+    return JSONResponse({
+        "status": "success",
+        "creator": "Sanka Vollerei",
+        "data": { "days": days_result }
+    })
+
+# ==========================================
+# 3. HOME & LATEST
+# ==========================================
+@app.get("/anime/samehadaku/home")
+def get_home_data():
+    soup = get_soup(BASE_URL)
+    if not soup: return JSONResponse({"status": "failed"}, 500)
+    
+    data = {}
+    
+    # Recent
+    recent_list = []
+    for item in soup.select(".post-show li")[:10] or soup.select(".animepost")[:10]:
+        base = parse_anime_item_standard(item)
+        if base:
+            # Add episodes & released info
+            ep_tag = item.find("span", class_="episode") or item.find("div", class_="dtla")
+            base['episodes'] = ep_tag.get_text(strip=True).replace("Episode", "").strip() if ep_tag else "?"
+            
+            date_tag = item.find("span", class_="date") or item.find("span", class_="year")
+            base['releasedOn'] = date_tag.get_text(strip=True) if date_tag else "?"
+            recent_list.append(base)
+    
+    data["recent"] = { "href": "/samehadaku/recent", "animeList": recent_list }
+    
+    # Top 10
+    top_list = []
+    top_nodes = soup.select(".widget_senction.popular .serieslist li") or soup.select(".serieslist.pop li")
+    for idx, item in enumerate(top_nodes, 1):
+        base = parse_anime_item_standard(item)
+        if base:
+            base['rank'] = idx
+            top_list.append(base)
+    
+    data["top10"] = { "href": "/samehadaku/top10", "animeList": top_list }
+    data["batch"] = { "href": "/samehadaku/batch", "batchList": [] } # Placeholder
+    data["movie"] = { "href": "/samehadaku/movies", "animeList": [] } # Placeholder
+
+    return JSONResponse({"status": "success", "data": data})
+
+@app.get("/anime/samehadaku/latest")
+def get_latest(page: int = 1):
+    url = f"{BASE_URL}/anime-terbaru/page/{page}/"
+    if page == 1: url = f"{BASE_URL}/anime-terbaru/"
+    soup = get_soup(url)
+    
+    results = []
+    for item in soup.select(".post-show li") or soup.select(".animepost"):
+        base = parse_anime_item_standard(item)
+        if base:
+            ep_tag = item.find("span", class_="episode")
+            base['episodes'] = ep_tag.get_text(strip=True).replace("Episode", "").strip() if ep_tag else "?"
+            date_tag = item.find("span", class_="date")
+            base['releasedOn'] = date_tag.get_text(strip=True) if date_tag else "?"
+            results.append(base)
+            
+    return JSONResponse({
+        "status": "success",
+        "data": { "animeList": results },
+        "pagination": get_pagination(soup, page)
+    })
+
+# ==========================================
+# 4. LISTS (ONGOING, COMPLETED, POPULAR, MOVIES)
+# ==========================================
+@app.get("/anime/samehadaku/ongoing")
+def get_ongoing(page: int = 1):
+    soup = get_soup(f"{BASE_URL}/daftar-anime-2/page/{page}/?status=Ongoing&order=update")
+    results = [parse_anime_item_standard(x) for x in soup.select(".animepost") if parse_anime_item_standard(x)]
+    return JSONResponse({"status": "success", "data": {"animeList": results}, "pagination": get_pagination(soup, page)})
+
+@app.get("/anime/samehadaku/completed")
+def get_completed(page: int = 1):
+    soup = get_soup(f"{BASE_URL}/daftar-anime-2/page/{page}/?status=Completed&order=latest")
+    results = [parse_anime_item_standard(x) for x in soup.select(".animepost") if parse_anime_item_standard(x)]
+    # Force status completed
+    for r in results: r['status'] = "Completed"
+    return JSONResponse({"status": "success", "data": {"animeList": results}, "pagination": get_pagination(soup, page)})
+
+@app.get("/anime/samehadaku/popular")
+def get_popular(page: int = 1):
+    soup = get_soup(f"{BASE_URL}/daftar-anime-2/page/{page}/?order=popular")
+    results = [parse_anime_item_standard(x) for x in soup.select(".animepost") if parse_anime_item_standard(x)]
+    return JSONResponse({"status": "success", "data": {"animeList": results}, "pagination": get_pagination(soup, page)})
+
+@app.get("/anime/samehadaku/movies")
+def get_movies(page: int = 1):
+    soup = get_soup(f"{BASE_URL}/anime-movie/page/{page}/")
+    results = [parse_anime_item_standard(x) for x in soup.select(".animepost") if parse_anime_item_standard(x)]
+    for r in results: r['type'] = "Movie"
+    return JSONResponse({"status": "success", "data": {"animeList": results}, "pagination": get_pagination(soup, page)})
+
+# ==========================================
+# 5. BATCH LIST
+# ==========================================
+@app.get("/anime/samehadaku/batch")
+def get_batch_list(page: int = 1):
+    soup = get_soup(f"{BASE_URL}/daftar-batch/page/{page}/")
+    results = []
+    for node in soup.select(".animepost"):
+        try:
+            item = parse_anime_item_standard(node)
+            if item:
+                # Modif field biar sesuai batch
+                item['batchId'] = item.pop('animeId')
+                item['href'] = f"/anime/samehadaku/batch/{item['batchId']}"
+                results.append(item)
+        except: continue
+    return JSONResponse({"status": "success", "data": {"batchList": results}, "pagination": get_pagination(soup, page)})
+
+# ==========================================
+# 6. GENRES
+# ==========================================
+@app.get("/anime/samehadaku/genres/{genre_id}")
+def get_anime_by_genre(genre_id: str, page: int = 1):
+    soup = get_soup(f"{BASE_URL}/genre/{genre_id}/page/{page}/")
+    results = [parse_anime_item_standard(x) for x in soup.select(".animepost") if parse_anime_item_standard(x)]
+    return JSONResponse({"status": "success", "data": {"animeList": results}, "pagination": get_pagination(soup, page)})
+
+# ==========================================
+# 7. DETAILS (ANIME & EPISODE)
+# ==========================================
 @app.get("/anime/samehadaku/anime/{anime_id}")
 def get_anime_detail(anime_id: str):
-    url = f"{BASE_URL}/anime/{anime_id}/"
-    soup = get_soup(url)
-    if not soup: return JSONResponse({"status": "failed", "message": "Not found"}, 404)
+    soup = get_soup(f"{BASE_URL}/anime/{anime_id}/")
+    if not soup: return JSONResponse({"status": "failed"}, 404)
     
     try:
         title = soup.find("h1", class_="entry-title").get_text(strip=True)
@@ -161,8 +341,7 @@ def get_anime_detail(anime_id: str):
         
         # Info Parsing
         infos = {}
-        spe_list = soup.select(".infox .spe span")
-        for spe in spe_list:
+        for spe in soup.select(".infox .spe span"):
             text = spe.get_text(strip=True)
             if ":" in text:
                 key, val = text.split(":", 1)
@@ -173,139 +352,78 @@ def get_anime_detail(anime_id: str):
         paragraphs = []
         if synopsis_div:
             ps = synopsis_div.find_all("p")
-            if ps:
-                paragraphs = [p.get_text(strip=True) for p in ps if p.get_text(strip=True)]
-            else:
-                paragraphs = [synopsis_div.get_text(strip=True)]
+            paragraphs = [p.get_text(strip=True) for p in ps if p.get_text(strip=True)] if ps else [synopsis_div.get_text(strip=True)]
 
         # Episode List
         episodes = []
-        ep_list = soup.select(".lstepsiode li")
-        for li in ep_list:
+        for li in soup.select(".lstepsiode li"):
             a_tag = li.find("a")
-            if not a_tag: continue
-            
-            ep_url = a_tag['href']
-            ep_id = extract_id(ep_url)
-            
-            episodes.append({
-                "title": li.find("span", class_="epl-title").get_text(strip=True) if li.find("span", class_="epl-title") else a_tag.get_text(strip=True),
-                "episodeId": ep_id,
-                "href": f"/anime/samehadaku/episode/{ep_id}",
-                "date": li.find("span", class_="date").get_text(strip=True) if li.find("span", class_="date") else "?"
-            })
+            if a_tag:
+                ep_id = extract_id(a_tag['href'])
+                episodes.append({
+                    "title": li.find("span", class_="epl-title").get_text(strip=True) if li.find("span", class_="epl-title") else a_tag.get_text(strip=True),
+                    "episodeId": ep_id,
+                    "href": f"/anime/samehadaku/episode/{ep_id}",
+                    "date": li.find("span", class_="date").get_text(strip=True) if li.find("span", class_="date") else "?"
+                })
 
         data = {
-            "title": title,
-            "poster": poster,
-            "score": infos.get("score", "?"),
-            "status": infos.get("status", "Unknown"),
-            "type": infos.get("type", "TV"),
+            "title": title, "poster": poster,
+            "score": { "value": infos.get("score", "?"), "users": "N/A" },
+            "status": infos.get("status", "Unknown"), "type": infos.get("type", "TV"),
             "synopsis": { "paragraphs": paragraphs },
             "genreList": parse_genre_list(soup.find("div", class_="genre-info")),
-            "episodeList": episodes
+            "episodeList": episodes,
+            "japanese": infos.get("japanese", "-"), "synonyms": infos.get("synonyms", "-"),
+            "english": infos.get("english", "-"), "source": infos.get("source", "-"),
+            "duration": infos.get("duration", "-"), "studios": infos.get("studio", "-")
         }
-        
         return JSONResponse({"status": "success", "data": data})
-    except Exception as e:
-        return JSONResponse({"status": "failed", "error": str(e)}, 500)
+    except Exception as e: return JSONResponse({"status": "failed", "error": str(e)}, 500)
 
-# --- ENDPOINT 4: EPISODE DETAIL (DOWNLOAD LINKS) ---
 @app.get("/anime/samehadaku/episode/{episode_id}")
 def get_episode_detail(episode_id: str):
-    # Samehadaku episode URL biasanya di root: samehadaku.how/slug-episode/
-    url = f"{BASE_URL}/{episode_id}/"
-    soup = get_soup(url)
-    if not soup: return JSONResponse({"status": "failed", "message": "Episode not found"}, 404)
+    soup = get_soup(f"{BASE_URL}/{episode_id}/")
+    if not soup: return JSONResponse({"status": "failed"}, 404)
     
     try:
         title = soup.find("h1", class_="entry-title").get_text(strip=True)
         
-        # Next/Prev Navigation
+        # Navigation
         nav = { "prev": None, "next": None }
-        prev_a = soup.find("a", class_="prev") or soup.find("div", class_="naveps bignav").find("a", attrs={"href": True}, string="Previous")
-        next_a = soup.find("a", class_="next") or soup.find("div", class_="naveps bignav").find("a", attrs={"href": True}, string="Next")
-        
-        if prev_a and "/anime/" not in prev_a['href']: # Validasi bukan link ke list anime
-            nav["prev"] = f"/anime/samehadaku/episode/{extract_id(prev_a['href'])}"
-        if next_a and "/anime/" not in next_a['href']:
-            nav["next"] = f"/anime/samehadaku/episode/{extract_id(next_a['href'])}"
+        prev_a = soup.find("a", class_="prev")
+        next_a = soup.find("a", class_="next")
+        if prev_a and "/anime/" not in prev_a['href']: nav["prev"] = f"/anime/samehadaku/episode/{extract_id(prev_a['href'])}"
+        if next_a and "/anime/" not in next_a['href']: nav["next"] = f"/anime/samehadaku/episode/{extract_id(next_a['href'])}"
 
-        # --- DOWNLOAD LINKS PARSING (COMPLEX) ---
+        # Download Links
         download_formats = []
-        
-        # Cari container download
         download_box = soup.find("div", class_="download-eps") or soup.find("div", id="server")
-        
         if download_box:
-            # Samehadaku sering ganti struktur. Biasanya:
-            # <ul> untuk setiap format (MP4, MKV)
-            # <li> untuk setiap kualitas
-            # <strong> untuk label kualitas
-            
-            # Kita cari semua unordered list (ul) di dalam box
-            uls = download_box.find_all("ul")
-            
-            for ul in uls:
-                # Cari Judul Format (MP4 / MKV / x265)
-                # Biasanya ada di elemen sebelum <ul> (misal <p><b>MP4</b></p> atau <h4>)
-                format_title = "Unknown Format"
-                prev_elem = ul.find_previous(["p", "h4", "div", "span"])
-                if prev_elem:
-                    format_title = prev_elem.get_text(strip=True)
+            for ul in download_box.find_all("ul"):
+                format_title = "Unknown"
+                prev = ul.find_previous(["p", "h4", "div"])
+                if prev: format_title = prev.get_text(strip=True)
                 
-                # Bersihkan title (kadang ada text sampah)
                 if "MKV" in format_title: format_title = "MKV"
-                elif "x265" in format_title: format_title = "x265 [Mode Irit Kuota]"
                 elif "MP4" in format_title: format_title = "MP4"
+                elif "x265" in format_title: format_title = "x265"
                 
                 qualities = []
+                for li in ul.find_all("li"):
+                    q_name = li.find("strong").get_text(strip=True) if li.find("strong") else "Unknown"
+                    urls = [{"title": a.get_text(strip=True), "url": a['href']} for a in li.find_all("a")]
+                    qualities.append({"title": q_name, "urls": urls})
                 
-                # Loop setiap baris kualitas (li)
-                lis = ul.find_all("li")
-                for li in lis:
-                    # Ambil label kualitas (360p, 480p, dll)
-                    q_tag = li.find("strong") or li.find("b")
-                    quality_name = q_tag.get_text(strip=True) if q_tag else "Unknown"
-                    
-                    # Ambil Link
-                    urls = []
-                    links = li.find_all("a")
-                    for link in links:
-                        urls.append({
-                            "title": link.get_text(strip=True),
-                            "url": link['href']
-                        })
-                    
-                    qualities.append({
-                        "title": quality_name,
-                        "urls": urls
-                    })
-                
-                # Jika format ini punya qualities, tambahkan ke list utama
-                if qualities:
-                    download_formats.append({
-                        "title": format_title,
-                        "qualities": qualities
-                    })
+                if qualities: download_formats.append({"title": format_title, "qualities": qualities})
 
-        # STREAM LINK (Iframe)
-        stream_url = ""
-        iframe = soup.find("iframe")
-        if iframe: stream_url = iframe['src']
-
-        data = {
-            "title": title,
-            "streamUrl": stream_url,
-            "navigation": nav,
-            "downloads": download_formats
-        }
-        
-        return JSONResponse({"status": "success", "data": data})
-
-    except Exception as e:
-        return JSONResponse({"status": "failed", "error": str(e)}, 500)
-
-@app.get("/")
-def home():
-    return {"message": "Samehadaku API V14 - Full Endpoints Ready"}
+        return JSONResponse({
+            "status": "success", 
+            "data": {
+                "title": title,
+                "streamUrl": soup.find("iframe")['src'] if soup.find("iframe") else "",
+                "navigation": nav,
+                "downloads": download_formats
+            }
+        })
+    except Exception as e: return JSONResponse({"status": "failed", "error": str(e)}, 500)
