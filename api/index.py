@@ -1,156 +1,253 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 import requests
 from bs4 import BeautifulSoup
 import re
 
-app = FastAPI(title="Samehadaku Scraper V7")
+app = FastAPI(title="Samehadaku Scraper Final")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://samehadaku.how/",
-    "Accept-Language": "en-US,en;q=0.9,id;q=0.8"
+    "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
 BASE_URL = "https://v1.samehadaku.how"
 
-# pakai 1 session global (lebih cepat + koneksi reuse)
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
-
 def get_soup(url: str):
     try:
-        r = SESSION.get(url, timeout=20)
-        r.raise_for_status()
-        return BeautifulSoup(r.text, "html.parser")
+        session = requests.Session()
+        req = session.get(url, headers=HEADERS, timeout=20)
+        req.raise_for_status()
+        return BeautifulSoup(req.text, "html.parser")
     except Exception as e:
         print(f"Error scraping {url}: {e}")
         return None
 
-def _clean_text(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip())
+# --- HELPER KHUSUS BUAT ITEM JADWAL ---
+def parse_schedule_item(node):
+    """
+    Mengambil data detail sesuai request JSON:
+    title, url, image, type, score, genre (string), time
+    """
+    try:
+        # 1. Title & URL
+        a_tag = node.find("a")
+        if not a_tag: return None
+        
+        title = a_tag.get_text(strip=True)
+        # Fallback title jika kosong
+        if not title:
+            title_div = node.find("div", class_="title")
+            if title_div: title = title_div.get_text(strip=True)
+            
+        url = a_tag['href']
 
-def parse_schedule_row(row) -> dict | None:
-    """
-    Parser khusus halaman jadwal-rilis:
-    - cari link anime (/anime/...)
-    - cari jam (HH:MM) di row yang sama
-    - ambil type/score/genre kalau kebaca dari teks, tapi ga maksa
-    """
-    a = row.select_one('a[href*="/anime/"]')
-    if not a:
+        # 2. Image (Handle Lazy Load)
+        img_tag = node.find("img")
+        image = "https://dummyimage.com/300x400/000/fff&text=No+Image"
+        if img_tag:
+            # Cek src, data-src, atau srcset
+            image = img_tag.get('src')
+            if not image or "data:image" in image:
+                image = img_tag.get('data-src') or img_tag.get('srcset') or image
+            # Bersihkan URL (kadang ada query string aneh)
+            if image and "?" in image:
+                image = image.split("?")[0]
+
+        # 3. Score
+        score = "N/A"
+        score_tag = node.find("div", class_="score") or node.find("span", class_="score")
+        if score_tag:
+            score = score_tag.get_text(strip=True)
+
+        # 4. Genre (Harus String: "Action, Adventure")
+        # Di halaman jadwal, genre seringkali tidak ditampilkan langsung.
+        # Kita coba cari di dalam tooltip atau hidden div, kalau gak ada kosongin dulu.
+        genres_list = []
+        genre_tags = node.select(".genres a") or node.select(".genre a")
+        if genre_tags:
+            genres_list = [g.get_text(strip=True) for g in genre_tags]
+        genre_str = ", ".join(genres_list) if genres_list else "-"
+
+        # 5. Type (TV/Movie)
+        # Biasanya ada di class 'type' atau meta
+        anime_type = "TV" # Default Samehadaku kebanyakan TV
+        type_tag = node.find("div", class_="type")
+        if type_tag:
+            anime_type = type_tag.get_text(strip=True)
+
+        # 6. Time (Jam Tayang)
+        # Biasanya ada di span class 'time' atau 'date' di jadwal
+        time_release = "??"
+        time_tag = node.find("span", class_="time") or node.find("div", class_="btime")
+        if time_tag:
+            time_release = time_tag.get_text(strip=True)
+
+        return {
+            "title": title,
+            "url": url,
+            "image": image,
+            "type": anime_type,
+            "score": score,
+            "genre": genre_str,
+            "time": time_release
+        }
+    except Exception as e:
         return None
 
-    link = a.get("href")
-    txt = _clean_text(a.get_text(" ", strip=True))
+@app.get("/")
+def home():
+    return {"status": "Online", "msg": "Samehadaku API Final - JSON Structure Fixed"}
 
-    # cari jam di seluruh row text (sering jam itu elemen terpisah)
-    row_txt = _clean_text(row.get_text(" ", strip=True))
-    m_time = re.search(r"\b([01]\d|2[0-3]):[0-5]\d\b", row_txt)
-    time_str = m_time.group(0) if m_time else None
-
-    # coba tebak type + score dari awal teks: "TV 6.68 Judul ..."
-    anime_type = None
-    score = None
-    title_guess = txt
-
-    m = re.match(r"^(TV|Movie|ONA|OVA|Special)\s+([0-9]+(?:\.[0-9]+)?)\s+(.*)$", txt, re.IGNORECASE)
-    if m:
-        anime_type = m.group(1)
-        score = m.group(2)
-        title_guess = m.group(3).strip()
-
-    # genres kadang muncul di anchor text setelah judul,
-    # tapi pola tiap saat bisa berubah, jadi ambil kalau ada container genre
-    genres = [ _clean_text(x.get_text(strip=True)) for x in row.select(".genres a, .genre a") ] or []
-
-    return {
-        "title": title_guess,
-        "link": link,
-        "time": time_str,
-        "type": anime_type,
-        "score": score,
-        "genres": genres
-    }
-
+# --- 1. JADWAL (STRUKTUR JSON SESUAI REQUEST) ---
 @app.get("/api/schedule")
 def get_schedule():
     soup = get_soup(f"{BASE_URL}/jadwal-rilis/")
-    if not soup:
-        return JSONResponse(content={"success": False, "error": "failed_to_fetch"}, status_code=502)
-
-    final_schedule = {
-        "Monday": [], "Tuesday": [], "Wednesday": [], "Thursday": [],
-        "Friday": [], "Saturday": [], "Sunday": []
+    if not soup: return {"success": False, "message": "Gagal fetch data"}
+    
+    # Mapping Hari Inggris (Key) ke Indo (Header di Web)
+    day_mapping = {
+        "monday": "Senin",
+        "tuesday": "Selasa",
+        "wednesday": "Rabu",
+        "thursday": "Kamis",
+        "friday": "Jumat",
+        "saturday": "Sabtu",
+        "sunday": "Minggu"
     }
 
-    # Indo -> Eng (Jumat punya alias 'Jumaat' di halaman)
-    indo_to_eng = {
-        "senin": "Monday",
-        "selasa": "Tuesday",
-        "rabu": "Wednesday",
-        "kamis": "Thursday",
-        "jumat": "Friday",
-        "jumaat": "Friday",
-        "sabtu": "Saturday",
-        "minggu": "Sunday",
-    }
+    final_data = {}
 
-    # 1) Ambil tab hari + target pane dari nav tabs (paling stabil buat halaman tab)
-    # contoh: <a href="#senin">Senin</a>
-    tab_links = soup.select(".nav-tabs a[href^='#'], ul li a[href^='#'], a[href^='#']")
-    tabs = []
-    for a in tab_links:
-        day_txt = _clean_text(a.get_text(strip=True)).lower()
-        href = a.get("href") or ""
-        if not href.startswith("#"):
+    # Cari container utama konten
+    content_area = soup.find("div", class_="entry-content") or soup.find("div", class_="schedule") or soup
+
+    for eng_key, indo_name in day_mapping.items():
+        # Structure default per hari
+        day_data = {
+            "dayName": indo_name,
+            "totalItems": 0,
+            "items": []
+        }
+
+        # LOGIC PENCARIAN:
+        # 1. Cari elemen header yang tulisannya = indo_name (Contoh: "Senin")
+        header = content_area.find(lambda tag: tag.name in ['h3', 'h4', 'div', 'span'] and indo_name.lower() == tag.get_text(strip=True).lower())
+        
+        if header:
+            # 2. Cari Container Anime untuk Header ini
+            # Biasanya anime dibungkus di div setelah header, atau di dalam parent yang sama
+            
+            # Coba ambil sibling elemen setelah header (biasanya div berisi list anime)
+            anime_container = header.find_next_sibling("div")
+            
+            # Jika siblingnya bukan container anime, coba cari parent schedule-box
+            if not anime_container or ("animepost" not in str(anime_container) and "ul" not in str(anime_container)):
+                parent_box = header.find_parent("div", class_="schedule-box")
+                if parent_box:
+                    anime_container = parent_box
+            
+            items_found = []
+            if anime_container:
+                # Ambil semua item anime (bisa format grid .animepost atau list li)
+                raw_items = anime_container.select(".animepost") or anime_container.select("li")
+                
+                for raw in raw_items:
+                    # Validasi: Item harus punya Link
+                    if raw.find("a"): 
+                        parsed = parse_schedule_item(raw)
+                        # Filter duplikat judul
+                        if parsed and parsed['title'] not in [x['title'] for x in items_found]:
+                            items_found.append(parsed)
+            
+            day_data["items"] = items_found
+            day_data["totalItems"] = len(items_found)
+        
+        # Masukkan ke dictionary utama dengan key lowercase (monday, tuesday...)
+        final_data[eng_key] = day_data
+
+    return JSONResponse(content={"success": True, "data": final_data})
+
+
+# --- 2. LATEST (SELECTOR DIPERBAIKI) ---
+@app.get("/api/latest")
+def get_latest():
+    soup = get_soup(f"{BASE_URL}/anime-terbaru/")
+    if not soup: return {"success": False}
+    
+    data = []
+    # Selector gabungan biar dapet semua format
+    posts = soup.select(".post-show li") or soup.select(".animepost") or soup.select("div.post-article")
+
+    for post in posts:
+        # Pake parser yang sama tapi sesuaikan field
+        # Kita pakai manual extract disini biar fleksibel buat endpoint latest
+        try:
+            title_tag = post.find("h2", class_="entry-title") or post.find("div", class_="title") or post.find("a")
+            if not title_tag: continue
+            
+            title = title_tag.get_text(strip=True)
+            link = post.find("a")['href']
+            
+            img_tag = post.find("img")
+            thumb = None
+            if img_tag:
+                thumb = img_tag.get('src')
+                if not thumb or "data:image" in thumb:
+                    thumb = img_tag.get('data-src')
+
+            ep_tag = post.find("span", class_="episode") or post.find("div", class_="dtla")
+            episode = ep_tag.get_text(strip=True) if ep_tag else "New"
+            
+            date_tag = post.find("span", class_="date") or post.find("span", class_="year")
+            posted = date_tag.get_text(strip=True) if date_tag else "?"
+
+            data.append({
+                "title": title,
+                "link": link,
+                "thumbnail": thumb,
+                "episode": episode,
+                "posted": posted
+            })
+        except:
             continue
-        if day_txt in indo_to_eng:
-            tabs.append((day_txt, href.lstrip("#")))
+            
+    return JSONResponse(content={"success": True, "data": data})
 
-    # fallback kalau selector tab ga ketemu (ya namanya juga web)
-    if not tabs:
-        # cari list hari yang tampil di halaman (minimal yang kelihatan)
-        for day_txt in indo_to_eng.keys():
-            el = soup.find(lambda t: t and t.get_text(strip=True).lower() == day_txt)
-            if el:
-                # coba tebak pane: cari elemen dengan id=day_txt
-                tabs.append((day_txt, day_txt))
+# --- 3. DETAIL & SEARCH (STANDARD) ---
+@app.get("/api/detail")
+def get_detail(url: str):
+    soup = get_soup(url)
+    if not soup: return {"success": False}
+    try:
+        title = soup.find("h1", class_="entry-title").get_text(strip=True)
+        img = soup.find("div", class_="thumb").find("img")['src']
+        desc = soup.find("div", class_="desc").get_text(strip=True) if soup.find("div", class_="desc") else "-"
+        
+        episodes = []
+        for li in soup.select(".lstepsiode li"):
+            episodes.append({
+                "title": li.find("a").get_text(strip=True),
+                "url": li.find("a")['href'],
+                "date": li.find("span", class_="date").get_text(strip=True) if li.find("span", class_="date") else "?"
+            })
+            
+        return {"success": True, "result": {"title": title, "cover": img, "synopsis": desc, "episodes": episodes}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
-    # 2) Parse isi tiap pane
-    for indo_day, pane_id in tabs:
-        eng = indo_to_eng.get(indo_day)
-        if not eng:
-            continue
-
-        pane = soup.find(id=pane_id)
-        if not pane:
-            # fallback: cari section/tab-pane yang mengandung teks hari tsb
-            pane = soup.find(lambda t: t.name in ["div", "section"] and t.get("class") and "tab-pane" in t.get("class", []) and indo_day in _clean_text(t.get_text(" ", strip=True)).lower())
-
-        if not pane:
-            continue
-
-        # row item bisa <li>, <div>, atau apapun. kita ambil kandidat yang punya link anime.
-        candidates = pane.select("li, .animepost, div, article")
-        items = []
-        for row in candidates:
-            if not row.select_one('a[href*="/anime/"]'):
-                continue
-            parsed = parse_schedule_row(row)
-            if parsed:
-                items.append(parsed)
-
-        # buang duplikat judul+time (kadang markup dobel)
-        seen = set()
-        dedup = []
-        for it in items:
-            key = (it.get("title"), it.get("time"))
-            if key in seen:
-                continue
-            seen.add(key)
-            dedup.append(it)
-
-        final_schedule[eng] = dedup
-
-    return JSONResponse(content={"success": True, "data": final_schedule})
+@app.get("/api/search")
+def search(query: str):
+    soup = get_soup(f"{BASE_URL}/?s={query}")
+    data = []
+    if soup:
+        for item in soup.select(".animepost"):
+            try:
+                data.append({
+                    "title": item.find("div", class_="title").get_text(strip=True),
+                    "url": item.find("a")['href'],
+                    "image": item.find("img")['src'],
+                    "score": item.find("div", class_="score").get_text(strip=True)
+                })
+            except: continue
+    return {"success": True, "results": data}
