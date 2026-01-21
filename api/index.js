@@ -9,8 +9,6 @@ app.use(cors());
 // --- BASE CANDIDATES (fallback) ---
 const BASES = [
   'https://v1.samehadaku.how',
-  'https://samehadaku.how',
-  'https://www.samehadaku.how',
 ];
 
 // --- HEADERS ---
