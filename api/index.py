@@ -4,9 +4,8 @@ import requests
 from bs4 import BeautifulSoup
 import re
 
-app = FastAPI(title="Samehadaku API V30 - Python Perfect (Fixed Schedule)")
+app = FastAPI(title="Samehadaku API V30 - Python Perfect (Schedule Fixed)")
 
-# Headers Mirip Browser Asli
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://samehadaku.how/",
@@ -16,7 +15,9 @@ HEADERS = {
 
 BASE_URL = "https://v1.samehadaku.how"
 
-# --- HELPERS ---
+# ------------------------
+# HELPERS
+# ------------------------
 
 def get_soup(url: str):
     try:
@@ -27,7 +28,7 @@ def get_soup(url: str):
         req.raise_for_status()
         return BeautifulSoup(req.text, "html.parser")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error scraping {url}: {e}")
         return None
 
 def extract_id(url: str):
@@ -43,7 +44,11 @@ def extract_poster(node):
         return "https://dummyimage.com/300x400/000/fff&text=No+Image"
     if img.get("src") and "data:image" not in img.get("src"):
         return img.get("src").split("?")[0]
-    return img.get("data-src", "").split("?")[0] or img.get("src", "").split("?")[0] or "https://dummyimage.com/300x400/000/fff&text=No+Image"
+    return (
+        img.get("data-src", "").split("?")[0]
+        or img.get("src", "").split("?")[0]
+        or "https://dummyimage.com/300x400/000/fff&text=No+Image"
+    )
 
 def parse_genre_list(node):
     genres = []
@@ -92,7 +97,9 @@ def get_pagination(soup, current_page):
         "totalPages": total_pages,
     }
 
-# --- PARSERS ---
+# ------------------------
+# PARSERS
+# ------------------------
 
 def parse_latest_item(node):
     """Parser khusus Latest (anti text nyatu)"""
@@ -107,7 +114,6 @@ def parse_latest_item(node):
 
         anime_id = extract_id(real_url)
 
-        # Title
         title = "Unknown"
         t_div = node.find("div", class_="title")
         if t_div:
@@ -115,10 +121,8 @@ def parse_latest_item(node):
         else:
             title = a_tag.get("title") or a_tag.get_text(" ", strip=True) or "Unknown"
 
-        # Poster
         poster = extract_poster(node)
 
-        # Episode & Released (logic anti-nyatu)
         ep = "?"
         released = "?"
 
@@ -155,7 +159,7 @@ def parse_latest_item(node):
         return None
 
 def parse_library_item(node, status_force=None):
-    """Parser standard untuk List (ongoing, completed, popular, genre, search)"""
+    """Parser standard list (ongoing/completed/popular/search/genre)"""
     try:
         a_tag = node.find("a")
         if not a_tag:
@@ -198,58 +202,37 @@ def parse_library_item(node, status_force=None):
     except:
         return None
 
-# --- FIXED SCHEDULE PARSER (robust) ---
+# ------------------------
+# SCHEDULE (FIXED, robust)
+# ------------------------
 
 DAY_LABELS = {
     "Monday": ["senin"],
     "Tuesday": ["selasa"],
     "Wednesday": ["rabu"],
     "Thursday": ["kamis"],
-    "Friday": ["jumat", "jumaat"],   # penting: sering "Jumaat"
+    "Friday": ["jumat", "jumaat"],  # sering muncul "Jumaat"
     "Saturday": ["sabtu"],
     "Sunday": ["minggu"],
 }
 
-def normalize_day(s: str) -> str:
-    return re.sub(r"[^a-z]", "", (s or "").lower())
+TIME_RE = re.compile(r"\b(\d{1,2}:\d{2})\b")
 
-def is_day_header(tag) -> bool:
-    if not getattr(tag, "get_text", None):
-        return False
-    t = normalize_day(tag.get_text(" ", strip=True))
-    if not t:
-        return False
-    wanted = set()
-    for labs in DAY_LABELS.values():
-        for x in labs:
-            wanted.add(normalize_day(x))
-    return t in wanted
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
-def find_day_header(content, wanted_labels):
-    wanted = set(normalize_day(x) for x in wanted_labels)
-    for tag in content.find_all(["h1","h2","h3","h4","strong","b","p","div","span"], limit=4000):
-        txt = normalize_day(tag.get_text(" ", strip=True))
-        if txt in wanted:
-            return tag
-    return None
-
-def parse_schedule_item(node):
+def parse_schedule_item_from_anchor(a_tag):
     """
-    Jadwal rilis sering minim:
-    - ada link /anime/
-    - kadang format text: "TV 7.10 Judul ..."
-    - jam bisa "01:00"
+    a_tag = <a href="/anime/...">TV 6.41 Judul ...</a>
+    Jam biasanya ada dekat anchor (sibling/parent).
     """
     try:
-        a = node.find("a", href=True)
-        if not a:
-            return None
-        href = a["href"]
-        if "/anime/" not in href:
+        href = a_tag.get("href", "")
+        if not href or "/anime/" not in href:
             return None
 
         anime_id = extract_id(href)
-        raw = a.get_text(" ", strip=True)
+        raw = a_tag.get_text(" ", strip=True)
 
         atype = "TV"
         score = "?"
@@ -261,23 +244,35 @@ def parse_schedule_item(node):
             score = m.group("score").strip()
             title = m.group("title").strip()
 
-        # jam rilis
         estimation = None
-        time_tag = node.find("span", class_="time") or node.find("div", class_="btime")
-        if time_tag:
-            estimation = time_tag.get_text(" ", strip=True)
 
-        if not estimation:
-            blob = node.get_text(" ", strip=True)
-            mt = re.search(r"\b(\d{1,2}:\d{2})\b", blob)
+        # 1) sibling dekat anchor
+        sib = a_tag.next_sibling
+        hop = 0
+        while sib and hop < 6:
+            if hasattr(sib, "get_text"):
+                txt = sib.get_text(" ", strip=True)
+            else:
+                txt = str(sib).strip()
+            mt = TIME_RE.search(txt)
             if mt:
                 estimation = mt.group(1)
+                break
+            sib = sib.next_sibling
+            hop += 1
 
-        poster = "https://dummyimage.com/300x400/000/fff&text=No+Image"
+        # 2) parent kecil
+        if not estimation:
+            parent = a_tag.parent
+            if parent:
+                blob = parent.get_text(" ", strip=True)
+                mt = TIME_RE.search(blob)
+                if mt:
+                    estimation = mt.group(1)
 
         return {
             "title": title,
-            "poster": poster,
+            "poster": "https://dummyimage.com/300x400/000/fff&text=No+Image",
             "type": atype,
             "score": score,
             "animeId": anime_id,
@@ -289,13 +284,69 @@ def parse_schedule_item(node):
     except:
         return None
 
-# --- ENDPOINTS ---
+def find_day_container(content, day_keys):
+    """
+    Cari container hari via id/class/data-* atau anchor #hari -> id="hari".
+    Ini biar nggak ketipu menu hari.
+    """
+    for k in day_keys:
+        # id exact / contains
+        el = content.find(attrs={"id": re.compile(rf"^{re.escape(k)}$", re.I)})
+        if el:
+            return el
+        el = content.find(attrs={"id": re.compile(re.escape(k), re.I)})
+        if el:
+            return el
+
+        # class contains
+        el = content.find(class_=re.compile(rf"\b{re.escape(k)}\b", re.I))
+        if el:
+            return el
+
+        # data tabs
+        el = content.find(attrs={"data-day": re.compile(re.escape(k), re.I)})
+        if el:
+            return el
+        el = content.find(attrs={"data-tab": re.compile(re.escape(k), re.I)})
+        if el:
+            return el
+        el = content.find(attrs={"data-id": re.compile(re.escape(k), re.I)})
+        if el:
+            return el
+
+        # menu anchor -> target
+        a = content.find("a", href=re.compile(rf"#{re.escape(k)}$", re.I))
+        if a:
+            target = content.find(id=re.compile(rf"^{re.escape(k)}$", re.I))
+            if target:
+                return target
+
+    return None
+
+def looks_like_menu_day_tag(tag) -> bool:
+    """
+    Heuristik: biar nggak nyangkut ke menu hari di atas.
+    Menu hari biasanya di <ul>/<li> navigasi yang isinya cuma nama hari.
+    """
+    if not getattr(tag, "get_text", None):
+        return False
+    txt = _norm(tag.get_text(" ", strip=True))
+    if txt in [_norm(x) for labs in DAY_LABELS.values() for x in labs]:
+        # kalau tag ini ada dalam <a href="#senin"> biasanya menu
+        a = tag.find("a", href=True) if hasattr(tag, "find") else None
+        if a and a.get("href", "").startswith("#"):
+            return True
+    return False
+
+# ------------------------
+# ENDPOINTS
+# ------------------------
 
 @app.get("/")
 def home():
     return {"message": "Samehadaku API V30 - Python Works Best (Schedule Fixed)"}
 
-# 1. HOME
+# 1) HOME
 @app.get("/anime/samehadaku/home")
 def get_home_data():
     soup = get_soup(BASE_URL)
@@ -304,7 +355,6 @@ def get_home_data():
 
     data = {}
 
-    # Recent
     recent = []
     nodes = soup.select(".post-show li") or soup.select(".animepost")[:10]
     for n in nodes:
@@ -317,7 +367,6 @@ def get_home_data():
         "animeList": recent,
     }
 
-    # Top 10
     top10 = []
     top_nodes = soup.select(".widget_senction.popular .serieslist li") or soup.select(".serieslist.pop li")
     for idx, n in enumerate(top_nodes, 1):
@@ -341,7 +390,7 @@ def get_home_data():
 
     return JSONResponse({"status": "success", "creator": "Sanka Vollerei", "message": "", "data": data})
 
-# 2. SCHEDULE (FIXED)
+# 2) SCHEDULE (FIXED)
 @app.get("/anime/samehadaku/schedule")
 def get_schedule():
     soup = get_soup(f"{BASE_URL}/jadwal-rilis/")
@@ -351,49 +400,55 @@ def get_schedule():
     content = soup.find("div", class_="entry-content") or soup.find("main") or soup
 
     days_res = []
-    for eng_day, labels in DAY_LABELS.items():
+    all_day_tokens = set(_norm(x) for labs in DAY_LABELS.values() for x in labs)
+
+    for eng_day, keys in DAY_LABELS.items():
         anime_list = []
 
-        header = find_day_header(content, labels)
+        # 1) coba cari container hari yang bener (bukan menu)
+        container = find_day_container(content, keys)
 
-        # fallback: cari section berdasar id/class yang mengandung nama hari
-        section = None
-        if not header:
-            for lab in labels:
-                section = content.find(
-                    lambda t: getattr(t, "get", None)
-                    and (
-                        (t.get("id") and normalize_day(t.get("id")) == normalize_day(lab))
-                        or (
-                            t.get("class")
-                            and any(normalize_day(c) == normalize_day(lab) for c in (t.get("class") or []))
-                        )
-                    )
-                )
-                if section:
+        if container:
+            # parse semua link /anime/ di dalam container
+            for a in container.find_all("a", href=True):
+                if "/anime/" in a["href"]:
+                    it = parse_schedule_item_from_anchor(a)
+                    if it:
+                        anime_list.append(it)
+        else:
+            # 2) fallback: cari "header hari" yang bukan menu, lalu scan ke bawah sampai ketemu hari lain
+            header = None
+            for tag in content.find_all(["h1", "h2", "h3", "h4", "strong", "b", "p", "div", "span"]):
+                if looks_like_menu_day_tag(tag):
+                    continue
+                t = _norm(tag.get_text(" ", strip=True))
+                if t in set(_norm(x) for x in keys):
+                    header = tag
                     break
 
-        if header:
-            cur = header.find_next_sibling()
-            while cur and not is_day_header(cur):
-                candidates = cur.select("li, div") if hasattr(cur, "select") else []
-                if not candidates:
-                    candidates = [cur]
+            if header:
+                cur = header.find_next()
+                guard = 0
+                while cur and guard < 800:
+                    if looks_like_menu_day_tag(cur):
+                        cur = cur.find_next()
+                        guard += 1
+                        continue
 
-                for c in candidates:
-                    if getattr(c, "find", None) and c.find("a", href=re.compile(r"/anime/")):
-                        it = parse_schedule_item(c)
+                    tcur = _norm(cur.get_text(" ", strip=True))
+                    # stop kalau ketemu header hari lain
+                    if tcur in all_day_tokens and tcur not in set(_norm(x) for x in keys):
+                        break
+
+                    # ambil anchor anime di node ini
+                    a = cur.find("a", href=True) if hasattr(cur, "find") else None
+                    if a and "/anime/" in a.get("href", ""):
+                        it = parse_schedule_item_from_anchor(a)
                         if it:
                             anime_list.append(it)
 
-                cur = cur.find_next_sibling()
-
-        elif section:
-            for c in section.select("li, div"):
-                if c.find("a", href=re.compile(r"/anime/")):
-                    it = parse_schedule_item(c)
-                    if it:
-                        anime_list.append(it)
+                    cur = cur.find_next()
+                    guard += 1
 
         # dedup by animeId
         seen = set()
@@ -407,7 +462,7 @@ def get_schedule():
 
     return JSONResponse({"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"days": days_res}})
 
-# 3. LISTS
+# 3) LISTS
 @app.get("/anime/samehadaku/latest")
 def get_latest(page: int = 1):
     url = f"{BASE_URL}/anime-terbaru/page/{page}/" if page > 1 else f"{BASE_URL}/anime-terbaru/"
@@ -462,7 +517,7 @@ def get_completed(page: int = 1):
         {"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"animeList": results}, "pagination": get_pagination(soup, page)}
     )
 
-# 4. DETAIL ANIME
+# 4) DETAIL ANIME
 @app.get("/anime/samehadaku/anime/{anime_id}")
 def get_anime_detail(anime_id: str):
     soup = get_soup(f"{BASE_URL}/anime/{anime_id}/")
@@ -475,7 +530,6 @@ def get_anime_detail(anime_id: str):
 
         poster = extract_poster(soup.find("div", class_="thumb"))
 
-        # Info Parsing
         infos = {}
         for spe in soup.select(".infox .spe span"):
             txt = spe.get_text(":", strip=True)
@@ -504,7 +558,6 @@ def get_anime_detail(anime_id: str):
             else:
                 paragraphs = [synopsis_div.get_text(strip=True)]
 
-        # Episode List (clean)
         episodes = []
         for li in soup.select(".lstepsiode li"):
             a = li.find("a")
@@ -550,7 +603,7 @@ def get_anime_detail(anime_id: str):
     except Exception as e:
         return JSONResponse({"status": "failed", "error": str(e)}, 500)
 
-# 5. GENRES, BATCH, MOVIES, POPULAR, SEARCH
+# 5) GENRES / SEARCH / BATCH / MOVIES / POPULAR
 @app.get("/anime/samehadaku/genres")
 def get_all_genres():
     soup = get_soup(BASE_URL)
@@ -576,9 +629,7 @@ def get_anime_by_genre(genre_id: str, page: int = 1):
         if p:
             results.append(p)
 
-    return JSONResponse(
-        {"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"animeList": results}, "pagination": get_pagination(soup, page)}
-    )
+    return JSONResponse({"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"animeList": results}, "pagination": get_pagination(soup, page)})
 
 @app.get("/anime/samehadaku/search")
 def search_anime(query: str, page: int = 1):
@@ -594,9 +645,7 @@ def search_anime(query: str, page: int = 1):
         if p:
             results.append(p)
 
-    return JSONResponse(
-        {"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"animeList": results}, "pagination": get_pagination(soup, page)}
-    )
+    return JSONResponse({"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"animeList": results}, "pagination": get_pagination(soup, page)})
 
 @app.get("/anime/samehadaku/batch")
 def get_batch_list(page: int = 1):
@@ -614,9 +663,7 @@ def get_batch_list(page: int = 1):
             item["href"] = f"/samehadaku/batch/{item['batchId']}"
             results.append(item)
 
-    return JSONResponse(
-        {"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"batchList": results}, "pagination": get_pagination(soup, page)}
-    )
+    return JSONResponse({"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"batchList": results}, "pagination": get_pagination(soup, page)})
 
 @app.get("/anime/samehadaku/movies")
 def get_movies(page: int = 1):
@@ -633,9 +680,7 @@ def get_movies(page: int = 1):
             p["type"] = "Movie"
             results.append(p)
 
-    return JSONResponse(
-        {"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"animeList": results}, "pagination": get_pagination(soup, page)}
-    )
+    return JSONResponse({"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"animeList": results}, "pagination": get_pagination(soup, page)})
 
 @app.get("/anime/samehadaku/popular")
 def get_popular(page: int = 1):
@@ -651,11 +696,9 @@ def get_popular(page: int = 1):
         if p:
             results.append(p)
 
-    return JSONResponse(
-        {"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"animeList": results}, "pagination": get_pagination(soup, page)}
-    )
+    return JSONResponse({"status": "success", "creator": "Sanka Vollerei", "message": "", "data": {"animeList": results}, "pagination": get_pagination(soup, page)})
 
-# 6. EPISODE STREAM + DOWNLOADS
+# 6) EPISODE STREAM + DOWNLOADS
 @app.get("/anime/samehadaku/episode/{episode_id}")
 def get_episode_detail(episode_id: str):
     soup = get_soup(f"{BASE_URL}/{episode_id}/")
