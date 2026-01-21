@@ -8,40 +8,48 @@ app.use(cors());
 
 const BASE_URL = 'https://v1.samehadaku.how';
 
-// Headers lengkap biar dikira browser beneran
 const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': 'https://samehadaku.how/',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9,id;q=0.8'
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5'
 };
 
 // --- HELPERS ---
 
 const extractId = (url) => {
     if (!url) return '';
+    // Hapus trailing slash dan ambil segmen terakhir
     const parts = url.replace(/\/$/, '').split('/');
     return parts[parts.length - 1];
 };
 
 const extractPoster = ($node) => {
     const img = $node.find('img');
+    // Cek atribut lazyload umum
     let src = img.attr('src') || img.attr('data-src') || img.attr('srcset');
+    if (!src || src.includes('data:image')) {
+        src = img.attr('data-src') || img.attr('src');
+    }
     if (!src) return "https://dummyimage.com/300x400/000/fff&text=No+Image";
-    return src.split('?')[0];
+    return src.split('?')[0]; // Bersihkan query params
 };
 
 const parseGenreList = ($, $node) => {
     const genres = [];
-    const links = $node.find('.genres a, .genre-info a, .genre a, div.bean a');
+    const links = $node.find('a[href*="/genre/"]');
     links.each((i, el) => {
         const href = $(el).attr('href');
-        genres.push({
-            title: $(el).text().trim(),
-            genreId: extractId(href),
-            href: `/samehadaku/genres/${extractId(href)}`,
-            samehadakuUrl: href
-        });
+        const title = $(el).text().trim();
+        const id = extractId(href);
+        if (id) {
+            genres.push({
+                title: title,
+                genreId: id,
+                href: `/samehadaku/genres/${id}`,
+                samehadakuUrl: href
+            });
+        }
     });
     return genres;
 };
@@ -51,25 +59,24 @@ const getPagination = ($, currentPage) => {
     if (!$pagination.length) return null;
 
     let totalPages = 1;
-    const pageNumbers = $pagination.find('.page-numbers');
-    
-    pageNumbers.each((i, el) => {
-        const txt = $(el).text().replace(/,/g, '');
-        const num = parseInt(txt);
-        if (!isNaN(num) && num > totalPages) {
-            totalPages = num;
+    $pagination.find('.page-numbers').each((i, el) => {
+        const txt = $(el).text().replace(/,/g, '').trim();
+        if (!isNaN(txt)) {
+            const num = parseInt(txt);
+            if (num > totalPages) totalPages = num;
         }
     });
 
     const hasNext = $pagination.find('.next').length > 0;
     const hasPrev = $pagination.find('.prev').length > 0;
+    const curr = parseInt(currentPage);
 
     return {
-        currentPage: parseInt(currentPage),
+        currentPage: curr,
         hasPrevPage: hasPrev,
-        prevPage: hasPrev ? parseInt(currentPage) - 1 : null,
+        prevPage: hasPrev ? curr - 1 : null,
         hasNextPage: hasNext,
-        nextPage: hasNext ? parseInt(currentPage) + 1 : null,
+        nextPage: hasNext ? curr + 1 : null,
         totalPages: totalPages
     };
 };
@@ -83,31 +90,33 @@ const parseLatestItem = ($, el) => {
 
         const href = aTag.attr('href');
         const id = extractId(href);
-        const title = $(el).find('.title').text().trim() || aTag.attr('title') || "Unknown";
+        let title = $(el).find('.title').text().trim() || aTag.attr('title') || "Unknown";
         const poster = extractPoster($(el));
 
-        // Fix Episode & Date (Regex Clean)
+        // Logic Episode & Date
         let ep = '?';
         let released = '?';
         
-        // Ambil full text node, pisahkan dengan |
-        // Contoh raw: "One Piece Episode 123 Released on: 1 hour ago"
-        const fullText = $(el).text().replace(/\s\s+/g, ' '); 
+        // Ambil full text untuk regex
+        const fullText = $(el).text().replace(/\s+/g, ' ');
 
-        // Regex Episode
-        const epMatch = fullText.match(/(?:Episode\s?|Ep\s?)(\d+)/i);
-        if (epMatch) ep = epMatch[1];
+        // 1. Coba ambil dari elemen spesifik dulu
+        const epTag = $(el).find('.episode, .dtla');
+        const dateTag = $(el).find('.date, .year');
 
-        // Regex Date
-        if (fullText.includes("Released on:")) {
-            const parts = fullText.split("Released on:");
-            if (parts[1]) released = parts[1].trim().split("Posted")[0].trim();
-        } else if (fullText.includes("yang lalu")) {
-            const dateMatch = fullText.match(/(\d+\s+\w+\s+yang lalu)/);
-            if (dateMatch) released = dateMatch[1];
+        if (epTag.length) {
+            const rawEp = epTag.text().trim();
+            // Regex ambil angka setelah kata Episode atau angka saja
+            const mEp = rawEp.match(/(?:Episode\s*)?(\d+)/i);
+            if (mEp) ep = mEp[1];
+        }
+
+        if (dateTag.length) {
+            released = dateTag.text().trim();
         } else {
-            const dateTag = $(el).find('.date, .year');
-            if (dateTag.length) released = dateTag.text().trim();
+            // Regex Fallback Date "10 hours yang lalu"
+            const mDate = fullText.match(/(\d+\s+\w+\s+yang lalu)/i);
+            if (mDate) released = mDate[1];
         }
 
         return {
@@ -140,19 +149,7 @@ const parseLibraryItem = ($, el, statusForce = 'Ongoing') => {
 // --- ROUTES ---
 
 app.get('/', (req, res) => {
-    res.json({ 
-        status: "Online", 
-        message: "Samehadaku API is Running", 
-        routes: [
-            "/anime/samehadaku/home",
-            "/anime/samehadaku/schedule",
-            "/anime/samehadaku/latest",
-            "/anime/samehadaku/ongoing",
-            "/anime/samehadaku/completed",
-            "/anime/samehadaku/search?query=naruto",
-            "/anime/samehadaku/genres"
-        ]
-    });
+    res.json({ message: "Samehadaku API V28 (JS Fixed) is Running" });
 });
 
 // 1. HOME
@@ -171,7 +168,10 @@ app.get('/anime/samehadaku/home', async (req, res) => {
         const top10 = [];
         $('.widget_senction.popular .serieslist li, .serieslist.pop li').each((i, el) => {
             const p = parseLibraryItem($, el);
-            if (p) top10.push({ rank: i+1, ...p });
+            if (p) top10.push({
+                rank: i+1, title: p.title, poster: p.poster, score: p.score,
+                animeId: p.animeId, href: p.href, samehadakuUrl: p.samehadakuUrl
+            });
         });
 
         res.json({
@@ -202,50 +202,53 @@ app.get('/anime/samehadaku/schedule', async (req, res) => {
 
         for (const {eng, indo} of dayMap) {
             let list = [];
-            // Cari container dengan ID atau Class hari
+            // Cari container ID/Class
             let container = content.find(`#${indo}, .${indo}`);
             
-            // Fallback: Cari header text
+            // Fallback cari Header Text
             if (!container.length) {
                 content.find('h3, h4, b').each((i, el) => {
                     if ($(el).text().toLowerCase().includes(indo)) {
-                        let next = $(el).next();
-                        for(let k=0; k<3; k++) {
-                            if(next.find('.animepost, li a').length) { container = next; break; }
-                            next = next.next();
-                        }
+                        container = $(el).next(); // Coba next sibling
                     }
                 });
             }
 
-            if (container.length) {
+            if (container && container.length) {
                 container.find('.animepost, li').each((i, el) => {
-                    const p = parseLibraryItem($, el);
-                    if (p && p.samehadakuUrl.includes('/anime/')) {
-                        delete p.status;
-                        
-                        // Estimation
-                        let est = "Update";
-                        const timeTag = $(el).find('.time, .btime');
-                        if (timeTag.length) est = timeTag.text().trim();
-                        else {
-                            const tt = $(el).find('.ttls, .dtla').text();
-                            const m = tt.match(/(?:Pukul|Jam|Time|Rilis)\s*:\s*([\d\:]+)/i);
-                            if(m) est = m[1].trim();
+                    // Validasi Link Anime
+                    const link = $(el).find('a').attr('href');
+                    if (link && link.includes('/anime/')) {
+                        const p = parseLibraryItem($, el);
+                        if (p) {
+                            delete p.status; // Schedule pake estimation
+                            let est = "Update";
+                            
+                            // Cari Jam Tayang
+                            const timeTag = $(el).find('.time, .btime');
+                            if (timeTag.length) {
+                                est = timeTag.text().trim();
+                            } else {
+                                // Gali tooltip (Javascript Regex)
+                                const tt = $(el).find('.ttls, .dtla').text();
+                                const m = tt.match(/(?:Pukul|Jam|Time|Rilis)\s*:\s*([\d\:]+)/i);
+                                if(m) est = m[1].trim();
+                            }
+                            p.estimation = est;
+                            
+                            // Cek duplikat
+                            if(!list.find(x => x.title === p.title)) list.push(p);
                         }
-                        p.estimation = est;
-                        
-                        if(!list.find(x => x.title === p.title)) list.push(p);
                     }
                 });
             }
             days.push({ day: eng, animeList: list });
         }
-        res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: { days }, pagination: null });
+        res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: { days } });
     } catch (e) { res.status(500).json({ status: "failed", message: e.message }); }
 });
 
-// 3. LISTS (Latest, Ongoing, Completed, Search)
+// 3. LISTS
 const createListHandler = (urlFn, parserFn) => async (req, res) => {
     try {
         const page = req.query.page || 1;
@@ -284,11 +287,164 @@ app.get('/anime/samehadaku/popular', createListHandler(
 ));
 
 app.get('/anime/samehadaku/search', createListHandler(
-    (p, q) => `${BASE_URL}/${p > 1 ? `page/${p}/` : ''}?s=${q.query || q.s}`,
+    (p, q) => `${BASE_URL}/${p > 1 ? `page/${p}/` : ''}?s=${q.query || q.s || ''}`,
     ($, el) => parseLibraryItem($, el)
 ));
 
-// 4. GENRES
+// 4. DETAIL ANIME
+app.get('/anime/samehadaku/anime/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { data } = await axios.get(`${BASE_URL}/anime/${id}/`, { headers: HEADERS });
+        const $ = cheerio.load(data);
+
+        // Title Clean
+        let titleRaw = $('h1.entry-title').text().trim();
+        // Hapus kata-kata sampah
+        titleRaw = titleRaw.replace(/Nonton Anime|Sub Indo/gi, '').trim();
+        // Jika mau title kosong seperti request:
+        const title = ""; 
+
+        const poster = extractPoster($('.thumb'));
+        
+        // Metadata
+        const infos = {};
+        $('.infox .spe span').each((i, el) => {
+            const txt = $(el).text();
+            const parts = txt.split(':');
+            if (parts.length > 1) {
+                const k = parts[0].trim().toLowerCase();
+                const v = parts.slice(1).join(':').trim();
+                infos[k] = v;
+            }
+        });
+
+        // Score
+        let scoreVal = infos['score'] || '?';
+        if (scoreVal === '?') {
+            const sc = $('span[itemprop="ratingValue"]').text().trim();
+            if (sc) scoreVal = sc;
+        }
+        
+        const ratingCount = $('span[itemprop="ratingCount"]').text().trim();
+        const users = ratingCount ? `${ratingCount} users` : 'N/A';
+
+        // Synopsis
+        const paragraphs = [];
+        $('.desc p, .entry-content p').each((i, el) => {
+            if ($(el).text().trim()) paragraphs.push($(el).text().trim());
+        });
+
+        // Episodes
+        const episodes = [];
+        $('.lstepsiode li').each((i, el) => {
+            const a = $(el).find('a');
+            const href = a.attr('href');
+            const epId = extractId(href);
+            const rawTitle = $(el).find('.epl-title').text().trim() || a.text().trim();
+            
+            // Ambil angka episode
+            let epNum = rawTitle;
+            const mEp = rawTitle.match(/\d+/);
+            if (mEp) epNum = parseInt(mEp[0]);
+
+            episodes.push({
+                title: epNum,
+                episodeId: epId,
+                href: `/samehadaku/episode/${epId}`,
+                samehadakuUrl: href
+            });
+        });
+
+        const genreList = parseGenreList($, $('.genre-info'));
+
+        const respData = {
+            title,
+            poster,
+            score: { value: scoreVal, users },
+            japanese: infos['japanese'] || '-',
+            synonyms: infos['synonyms'] || '-',
+            english: infos['english'] || '-',
+            status: infos['status'] || 'Unknown',
+            type: infos['type'] || 'TV',
+            source: infos['source'] || '-',
+            duration: infos['duration'] || '-',
+            episodes: parseInt(infos['total episode']) || null,
+            season: infos['season'] || '-',
+            studios: infos['studio'] || '-',
+            producers: infos['producers'] || '-',
+            aired: infos['released'] || '-',
+            trailer: $('.trailer-anime iframe').attr('src') || "",
+            synopsis: { paragraphs, connections: [] },
+            genreList,
+            batchList: [],
+            episodeList: episodes
+        };
+
+        res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: respData, pagination: null });
+
+    } catch (e) { res.status(404).json({ status: "failed", message: "Not found" }); }
+});
+
+// 5. EPISODE STREAM & DOWNLOAD
+app.get('/anime/samehadaku/episode/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { data } = await axios.get(`${BASE_URL}/${id}/`, { headers: HEADERS });
+        const $ = cheerio.load(data);
+
+        const title = $('h1.entry-title').text().trim();
+        const streamUrl = $('iframe').attr('src') || "";
+        
+        const prevHref = $('.prev').attr('href');
+        const nextHref = $('.next').attr('href');
+        
+        const nav = {
+            prev: (prevHref && !prevHref.includes('/anime/')) ? `/samehadaku/episode/${extractId(prevHref)}` : null,
+            next: (nextHref && !nextHref.includes('/anime/')) ? `/samehadaku/episode/${extractId(nextHref)}` : null
+        };
+
+        const downloads = [];
+        const dlBox = $('.download-eps, #server');
+        if (dlBox.length) {
+            dlBox.find('ul').each((i, ul) => {
+                // Find Header (MP4/MKV)
+                let format = "Unknown";
+                let prev = $(ul).prev();
+                // Loop mundur sampai ketemu header text
+                while(prev.length && !['p', 'h4', 'div', 'span'].includes(prev.prop('tagName').toLowerCase())) {
+                    prev = prev.prev();
+                }
+                if (prev.length) format = prev.text().trim();
+
+                // Normalisasi nama format
+                if (/MKV/i.test(format)) format = 'MKV';
+                else if (/MP4/i.test(format)) format = 'MP4';
+                else if (/x265/i.test(format)) format = 'x265';
+
+                const qualities = [];
+                $(ul).find('li').each((j, li) => {
+                    const qName = $(li).find('strong, b').text().trim();
+                    const urls = [];
+                    $(li).find('a').each((k, a) => {
+                        urls.push({ title: $(a).text().trim(), url: $(a).attr('href') });
+                    });
+                    qualities.push({ title: qName, urls });
+                });
+                if (qualities.length) downloads.push({ title: format, qualities });
+            });
+        }
+
+        res.json({
+            status: "success", creator: "Sanka Vollerei", message: "",
+            data: { title, streamUrl, navigation: nav, downloads }
+        });
+    } catch (e) { res.status(404).json({ status: "failed" }); }
+});
+
+// 6. GENRES & BATCH & MOVIES (Standard Lists)
+const standardListHandler = (urlFn) => createListHandler(urlFn, parseLibraryItem);
+
 app.get('/anime/samehadaku/genres', async (req, res) => {
     try {
         const { data } = await axios.get(BASE_URL, { headers: HEADERS });
@@ -298,137 +454,34 @@ app.get('/anime/samehadaku/genres', async (req, res) => {
         $('a[href*="/genre/"]').each((i, el) => {
             const href = $(el).attr('href');
             if (!seen.has(href)) {
-                const id = extractId(href);
-                if (id) {
-                    list.push({ title: $(el).text().split('(')[0].trim(), genreId: id, href: `/samehadaku/genres/${id}`, samehadakuUrl: href });
-                    seen.add(href);
-                }
+                list.push({ title: $(el).text().split('(')[0].trim(), genreId: extractId(href), href: `/samehadaku/genres/${extractId(href)}`, samehadakuUrl: href });
+                seen.add(href);
             }
         });
         list.sort((a, b) => a.title.localeCompare(b.title));
         res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: { genreList: list } });
-    } catch (e) { res.status(500).json({ status: "failed" }); }
-});
-
-app.get('/anime/samehadaku/genres/:id', createListHandler(
-    (p, q) => `${BASE_URL}/genre/${req.params.id}/${p > 1 ? `page/${p}/` : ''}`, // Note: this needs req context fix, creating specific handler below
-    ($, el) => parseLibraryItem($, el)
-));
-// Fix Genre ID Route
-app.get('/anime/samehadaku/genres/:id', async (req, res) => {
-    try {
-        const page = req.query.page || 1;
-        const url = `${BASE_URL}/genre/${req.params.id}/${page > 1 ? `page/${page}/` : ''}`;
-        const { data } = await axios.get(url, { headers: HEADERS });
-        const $ = cheerio.load(data);
-        const animeList = [];
-        $('.animepost').each((i, el) => {
-            const item = parseLibraryItem($, el);
-            if(item) animeList.push(item);
-        });
-        res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: { animeList }, pagination: getPagination($, page) });
     } catch(e) { res.status(500).json({ status: "failed" }); }
 });
 
-// 5. DETAIL & EPISODE
-app.get('/anime/samehadaku/anime/:id', async (req, res) => {
-    try {
-        const { data } = await axios.get(`${BASE_URL}/anime/${req.params.id}/`, { headers: HEADERS });
-        const $ = cheerio.load(data);
+app.get('/anime/samehadaku/genres/:id', createListHandler(
+    (p, q) => `${BASE_URL}/genre/${req.params.id}/${p > 1 ? `page/${p}/` : ''}`,
+    parseLibraryItem
+));
 
-        let title = $('h1.entry-title').text().trim().replace(/Nonton Anime|Sub Indo/gi, '').trim();
-        const poster = extractPoster($('.thumb'));
-        
-        const infos = {};
-        $('.infox .spe span').each((i, el) => {
-            const txt = $(el).text();
-            const p = txt.split(':');
-            if(p.length > 1) infos[p[0].trim().toLowerCase()] = p.slice(1).join(':').trim();
-        });
+app.get('/anime/samehadaku/batch', createListHandler(
+    (p) => `${BASE_URL}/daftar-batch/${p > 1 ? `page/${p}/` : ''}`,
+    ($, el) => parseLibraryItem($, el, 'Completed')
+));
 
-        const scoreVal = infos['score'] || $('.ratingValue').text().trim() || '?';
-        const users = $('span[itemprop="ratingCount"]').text().trim() ? `${$('span[itemprop="ratingCount"]').text().trim()} users` : 'N/A';
+app.get('/anime/samehadaku/movies', createListHandler(
+    (p) => `${BASE_URL}/anime-movie/${p > 1 ? `page/${p}/` : ''}`,
+    ($, el) => { const i = parseLibraryItem($, el); if(i) i.type = "Movie"; return i; }
+));
 
-        const paragraphs = [];
-        $('.desc p, .entry-content p').each((i, el) => { if($(el).text().trim()) paragraphs.push($(el).text().trim()); });
-
-        const episodes = [];
-        $('.lstepsiode li').each((i, el) => {
-            const a = $(el).find('a');
-            const href = a.attr('href');
-            const epId = extractId(href);
-            const titleRaw = $(el).find('.epl-title').text().trim() || a.text().trim();
-            const epNumMatch = titleRaw.match(/\d+/);
-            const epNum = epNumMatch ? parseInt(epNumMatch[0]) : titleRaw;
-            episodes.push({ title: epNum, episodeId: epId, href: `/samehadaku/episode/${epId}`, samehadakuUrl: href });
-        });
-
-        res.json({
-            status: "success", creator: "Sanka Vollerei", message: "",
-            data: {
-                title: "", // Kosong sesuai request
-                poster,
-                score: { value: scoreVal, users },
-                japanese: infos['japanese'] || '-', synonyms: infos['synonyms'] || '-', english: infos['english'] || '-',
-                status: infos['status'] || 'Unknown', type: infos['type'] || 'TV', source: infos['source'] || '-',
-                duration: infos['duration'] || '-', episodes: parseInt(infos['total episode']) || null,
-                season: infos['season'] || '-', studios: infos['studio'] || '-', producers: infos['producers'] || '-',
-                aired: infos['released'] || '-', trailer: $('.trailer-anime iframe').attr('src') || "",
-                synopsis: { paragraphs, connections: [] },
-                genreList: parseGenreList($, $('.genre-info')),
-                batchList: [], episodeList: episodes
-            },
-            pagination: null
-        });
-    } catch (e) { res.status(404).json({ status: "failed", message: "Not found" }); }
-});
-
-app.get('/anime/samehadaku/episode/:id', async (req, res) => {
-    try {
-        const { data } = await axios.get(`${BASE_URL}/${req.params.id}/`, { headers: HEADERS });
-        const $ = cheerio.load(data);
-        const title = $('h1.entry-title').text().trim();
-        const prev = $('.prev').attr('href');
-        const next = $('.next').attr('href');
-        
-        const downloads = [];
-        $('.download-eps ul, #server ul').each((i, ul) => {
-            let format = "Unknown";
-            let p = $(ul).prev();
-            while(p.length && !p.is('p, h4, div, span')) p = p.prev();
-            if(p.length) format = p.text().trim().replace(/MKV|MP4|x265/g, m => m).split(' ')[0]; // Simple format guess
-            
-            const qualities = [];
-            $(ul).find('li').each((j, li) => {
-                const q = $(li).find('strong, b').text().trim();
-                const urls = [];
-                $(li).find('a').each((k, a) => urls.push({ title: $(a).text().trim(), url: $(a).attr('href') }));
-                qualities.push({ title: q, urls });
-            });
-            if(qualities.length) downloads.push({ title: format, qualities });
-        });
-
-        res.json({
-            status: "success", creator: "Sanka Vollerei", message: "",
-            data: {
-                title, streamUrl: $('iframe').attr('src') || "",
-                navigation: {
-                    prev: (prev && !prev.includes('/anime/')) ? `/samehadaku/episode/${extractId(prev)}` : null,
-                    next: (next && !next.includes('/anime/')) ? `/samehadaku/episode/${extractId(next)}` : null
-                },
-                downloads
-            }
-        });
-    } catch (e) { res.status(404).json({ status: "failed" }); }
-});
-
-// --- PENTING: START SERVER (SUPPORT LOCAL & VERCEL) ---
-// Ini yang bikin bisa jalan di localhost:3000
+// START SERVER
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
-    app.listen(PORT, () => {
-        console.log(`Server running on http://localhost:${PORT}`);
-    });
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }
 
 module.exports = app;
