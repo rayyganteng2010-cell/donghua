@@ -6,33 +6,48 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-const BASE_URL = 'https://v1.samehadaku.how';
+// Gunakan URL utama (kadang v1 diblokir, coba URL root jika v1 gagal)
+// Tapi kita tetap pakai v1 sesuai request lu, dengan headers lebih kuat.
+const BASE_URL = 'https://samehadaku.how'; 
 
+// --- ANTI-BOT HEADERS (STEALTH MODE) ---
 const HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
     'Referer': 'https://samehadaku.how/',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5'
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0'
 };
+
+// Buat instance axios khusus
+const client = axios.create({
+    headers: HEADERS,
+    timeout: 10000, // Timeout 10 detik
+    validateStatus: (status) => status < 500 // Biar 404/403 gak langsung throw error di axios
+});
 
 // --- HELPERS ---
 
 const extractId = (url) => {
     if (!url) return '';
-    // Hapus trailing slash dan ambil segmen terakhir
     const parts = url.replace(/\/$/, '').split('/');
     return parts[parts.length - 1];
 };
 
 const extractPoster = ($node) => {
     const img = $node.find('img');
-    // Cek atribut lazyload umum
     let src = img.attr('src') || img.attr('data-src') || img.attr('srcset');
     if (!src || src.includes('data:image')) {
         src = img.attr('data-src') || img.attr('src');
     }
     if (!src) return "https://dummyimage.com/300x400/000/fff&text=No+Image";
-    return src.split('?')[0]; // Bersihkan query params
+    return src.split('?')[0];
 };
 
 const parseGenreList = ($, $node) => {
@@ -93,20 +108,16 @@ const parseLatestItem = ($, el) => {
         let title = $(el).find('.title').text().trim() || aTag.attr('title') || "Unknown";
         const poster = extractPoster($(el));
 
-        // Logic Episode & Date
         let ep = '?';
         let released = '?';
         
-        // Ambil full text untuk regex
-        const fullText = $(el).text().replace(/\s+/g, ' ');
+        const fullText = $(el).text().replace(/\s+/g, ' '); 
 
-        // 1. Coba ambil dari elemen spesifik dulu
         const epTag = $(el).find('.episode, .dtla');
         const dateTag = $(el).find('.date, .year');
 
         if (epTag.length) {
             const rawEp = epTag.text().trim();
-            // Regex ambil angka setelah kata Episode atau angka saja
             const mEp = rawEp.match(/(?:Episode\s*)?(\d+)/i);
             if (mEp) ep = mEp[1];
         }
@@ -114,7 +125,6 @@ const parseLatestItem = ($, el) => {
         if (dateTag.length) {
             released = dateTag.text().trim();
         } else {
-            // Regex Fallback Date "10 hours yang lalu"
             const mDate = fullText.match(/(\d+\s+\w+\s+yang lalu)/i);
             if (mDate) released = mDate[1];
         }
@@ -149,121 +159,120 @@ const parseLibraryItem = ($, el, statusForce = 'Ongoing') => {
 // --- ROUTES ---
 
 app.get('/', (req, res) => {
-    res.json({ message: "Samehadaku API V28 (JS Fixed) is Running" });
+    res.json({ message: "Samehadaku API V29 (Anti-Bot Headers) is Running" });
 });
+
+// Helper wrapper untuk request agar error 403 tertangkap rapi
+const fetchPage = async (url) => {
+    try {
+        const response = await client.get(url);
+        // Jika masih 403/404, throw error manual biar masuk catch
+        if (response.status !== 200) {
+            throw new Error(`Request failed with status code ${response.status}`);
+        }
+        return cheerio.load(response.data);
+    } catch (error) {
+        console.error(`Error fetching ${url}:`, error.message);
+        return null;
+    }
+};
 
 // 1. HOME
 app.get('/anime/samehadaku/home', async (req, res) => {
-    try {
-        const { data } = await axios.get(BASE_URL, { headers: HEADERS });
-        const $ = cheerio.load(data);
-        
-        const recent = [];
-        const nodes = $('.post-show li, .animepost').slice(0, 10);
-        nodes.each((i, el) => {
-            const item = parseLatestItem($, el);
-            if (item) recent.push(item);
-        });
+    const $ = await fetchPage(BASE_URL);
+    if (!$) return res.status(500).json({ status: "failed", message: "Server blocked connection (403)" });
 
-        const top10 = [];
-        $('.widget_senction.popular .serieslist li, .serieslist.pop li').each((i, el) => {
-            const p = parseLibraryItem($, el);
-            if (p) top10.push({
-                rank: i+1, title: p.title, poster: p.poster, score: p.score,
-                animeId: p.animeId, href: p.href, samehadakuUrl: p.samehadakuUrl
-            });
-        });
+    const recent = [];
+    $('.post-show li, .animepost').slice(0, 10).each((i, el) => {
+        const item = parseLatestItem($, el);
+        if (item) recent.push(item);
+    });
 
-        res.json({
-            status: "success", creator: "Sanka Vollerei", message: "",
-            data: {
-                recent: { href: "/samehadaku/recent", samehadakuUrl: `${BASE_URL}/anime-terbaru/`, animeList: recent },
-                top10: { href: "/samehadaku/top10", samehadakuUrl: BASE_URL, animeList: top10 },
-                batch: { href: "/samehadaku/batch", samehadakuUrl: `${BASE_URL}/daftar-batch/`, batchList: [] },
-                movie: { href: "/samehadaku/movies", samehadakuUrl: `${BASE_URL}/anime-movie/`, animeList: [] }
-            }
+    const top10 = [];
+    $('.widget_senction.popular .serieslist li, .serieslist.pop li').each((i, el) => {
+        const p = parseLibraryItem($, el);
+        if (p) top10.push({
+            rank: i+1, title: p.title, poster: p.poster, score: p.score,
+            animeId: p.animeId, href: p.href, samehadakuUrl: p.samehadakuUrl
         });
-    } catch (e) { res.status(500).json({ status: "failed", message: e.message }); }
+    });
+
+    res.json({
+        status: "success", creator: "Sanka Vollerei", message: "",
+        data: {
+            recent: { href: "/samehadaku/recent", samehadakuUrl: `${BASE_URL}/anime-terbaru/`, animeList: recent },
+            top10: { href: "/samehadaku/top10", samehadakuUrl: BASE_URL, animeList: top10 },
+            batch: { href: "/samehadaku/batch", samehadakuUrl: `${BASE_URL}/daftar-batch/`, batchList: [] },
+            movie: { href: "/samehadaku/movies", samehadakuUrl: `${BASE_URL}/anime-movie/`, animeList: [] }
+        }
+    });
 });
 
 // 2. SCHEDULE
 app.get('/anime/samehadaku/schedule', async (req, res) => {
-    try {
-        const { data } = await axios.get(`${BASE_URL}/jadwal-rilis/`, { headers: HEADERS });
-        const $ = cheerio.load(data);
+    const $ = await fetchPage(`${BASE_URL}/jadwal-rilis/`);
+    if (!$) return res.status(500).json({ status: "failed", message: "Server blocked connection (403)" });
+
+    const dayMap = [
+        {eng:"Monday", indo:"senin"}, {eng:"Tuesday", indo:"selasa"}, {eng:"Wednesday", indo:"rabu"},
+        {eng:"Thursday", indo:"kamis"}, {eng:"Friday", indo:"jumat"}, {eng:"Saturday", indo:"sabtu"}, {eng:"Sunday", indo:"minggu"}
+    ];
+
+    const days = [];
+    const content = $('.entry-content, main').first();
+
+    for (const {eng, indo} of dayMap) {
+        let list = [];
+        let container = content.find(`#${indo}, .${indo}`);
         
-        const dayMap = [
-            {eng:"Monday", indo:"senin"}, {eng:"Tuesday", indo:"selasa"}, {eng:"Wednesday", indo:"rabu"},
-            {eng:"Thursday", indo:"kamis"}, {eng:"Friday", indo:"jumat"}, {eng:"Saturday", indo:"sabtu"}, {eng:"Sunday", indo:"minggu"}
-        ];
-
-        const days = [];
-        const content = $('.entry-content, main').first();
-
-        for (const {eng, indo} of dayMap) {
-            let list = [];
-            // Cari container ID/Class
-            let container = content.find(`#${indo}, .${indo}`);
-            
-            // Fallback cari Header Text
-            if (!container.length) {
-                content.find('h3, h4, b').each((i, el) => {
-                    if ($(el).text().toLowerCase().includes(indo)) {
-                        container = $(el).next(); // Coba next sibling
-                    }
-                });
-            }
-
-            if (container && container.length) {
-                container.find('.animepost, li').each((i, el) => {
-                    // Validasi Link Anime
-                    const link = $(el).find('a').attr('href');
-                    if (link && link.includes('/anime/')) {
-                        const p = parseLibraryItem($, el);
-                        if (p) {
-                            delete p.status; // Schedule pake estimation
-                            let est = "Update";
-                            
-                            // Cari Jam Tayang
-                            const timeTag = $(el).find('.time, .btime');
-                            if (timeTag.length) {
-                                est = timeTag.text().trim();
-                            } else {
-                                // Gali tooltip (Javascript Regex)
-                                const tt = $(el).find('.ttls, .dtla').text();
-                                const m = tt.match(/(?:Pukul|Jam|Time|Rilis)\s*:\s*([\d\:]+)/i);
-                                if(m) est = m[1].trim();
-                            }
-                            p.estimation = est;
-                            
-                            // Cek duplikat
-                            if(!list.find(x => x.title === p.title)) list.push(p);
-                        }
-                    }
-                });
-            }
-            days.push({ day: eng, animeList: list });
+        if (!container.length) {
+            content.find('h3, h4, b').each((i, el) => {
+                if ($(el).text().toLowerCase().includes(indo)) {
+                    container = $(el).next();
+                }
+            });
         }
-        res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: { days } });
-    } catch (e) { res.status(500).json({ status: "failed", message: e.message }); }
+
+        if (container && container.length) {
+            container.find('.animepost, li').each((i, el) => {
+                const link = $(el).find('a').attr('href');
+                if (link && link.includes('/anime/')) {
+                    const p = parseLibraryItem($, el);
+                    if (p) {
+                        delete p.status;
+                        let est = "Update";
+                        const timeTag = $(el).find('.time, .btime');
+                        if (timeTag.length) est = timeTag.text().trim();
+                        else {
+                            const tt = $(el).find('.ttls, .dtla').text();
+                            const m = tt.match(/(?:Pukul|Jam|Time|Rilis)\s*:\s*([\d\:]+)/i);
+                            if(m) est = m[1].trim();
+                        }
+                        p.estimation = est;
+                        if(!list.find(x => x.title === p.title)) list.push(p);
+                    }
+                }
+            });
+        }
+        days.push({ day: eng, animeList: list });
+    }
+    res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: { days } });
 });
 
 // 3. LISTS
 const createListHandler = (urlFn, parserFn) => async (req, res) => {
-    try {
-        const page = req.query.page || 1;
-        const url = urlFn(page, req.query);
-        const { data } = await axios.get(url, { headers: HEADERS });
-        const $ = cheerio.load(data);
-        
-        const animeList = [];
-        $('.post-show li, .animepost').each((i, el) => {
-            const item = parserFn($, el);
-            if (item) animeList.push(item);
-        });
+    const page = req.query.page || 1;
+    const url = urlFn(page, req.query);
+    const $ = await fetchPage(url);
+    if (!$) return res.status(500).json({ status: "failed", message: "Server blocked connection (403)" });
 
-        res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: { animeList }, pagination: getPagination($, page) });
-    } catch (e) { res.status(500).json({ status: "failed", message: e.message }); }
+    const animeList = [];
+    $('.post-show li, .animepost').each((i, el) => {
+        const item = parserFn($, el);
+        if (item) animeList.push(item);
+    });
+
+    res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: { animeList }, pagination: getPagination($, page) });
 };
 
 app.get('/anime/samehadaku/latest', createListHandler(
@@ -293,174 +302,141 @@ app.get('/anime/samehadaku/search', createListHandler(
 
 // 4. DETAIL ANIME
 app.get('/anime/samehadaku/anime/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { data } = await axios.get(`${BASE_URL}/anime/${id}/`, { headers: HEADERS });
-        const $ = cheerio.load(data);
+    const $ = await fetchPage(`${BASE_URL}/anime/${req.params.id}/`);
+    if (!$) return res.status(404).json({ status: "failed", message: "Not found or Blocked" });
 
-        // Title Clean
-        let titleRaw = $('h1.entry-title').text().trim();
-        // Hapus kata-kata sampah
-        titleRaw = titleRaw.replace(/Nonton Anime|Sub Indo/gi, '').trim();
-        // Jika mau title kosong seperti request:
-        const title = ""; 
+    // Clean Title
+    let titleRaw = $('h1.entry-title').text().trim();
+    // Biarkan string kosong sesuai request sebelumnya, atau isi titleRaw jika mau
+    const title = ""; 
 
-        const poster = extractPoster($('.thumb'));
-        
-        // Metadata
-        const infos = {};
-        $('.infox .spe span').each((i, el) => {
-            const txt = $(el).text();
-            const parts = txt.split(':');
-            if (parts.length > 1) {
-                const k = parts[0].trim().toLowerCase();
-                const v = parts.slice(1).join(':').trim();
-                infos[k] = v;
-            }
-        });
-
-        // Score
-        let scoreVal = infos['score'] || '?';
-        if (scoreVal === '?') {
-            const sc = $('span[itemprop="ratingValue"]').text().trim();
-            if (sc) scoreVal = sc;
+    const poster = extractPoster($('.thumb'));
+    
+    const infos = {};
+    $('.infox .spe span').each((i, el) => {
+        const txt = $(el).text();
+        const parts = txt.split(':');
+        if (parts.length > 1) {
+            const k = parts[0].trim().toLowerCase();
+            const v = parts.slice(1).join(':').trim();
+            infos[k] = v;
         }
+    });
+
+    const scoreVal = infos['score'] || $('.ratingValue').text().trim() || '?';
+    const userCount = $('span[itemprop="ratingCount"]').text().trim();
+    const users = userCount ? `${userCount} users` : 'N/A';
+
+    const paragraphs = [];
+    $('.desc p, .entry-content p').each((i, el) => {
+        if ($(el).text().trim()) paragraphs.push($(el).text().trim());
+    });
+
+    const episodes = [];
+    $('.lstepsiode li').each((i, el) => {
+        const a = $(el).find('a');
+        const href = a.attr('href');
+        const epId = extractId(href);
+        const rawTitle = $(el).find('.epl-title').text().trim() || a.text().trim();
         
-        const ratingCount = $('span[itemprop="ratingCount"]').text().trim();
-        const users = ratingCount ? `${ratingCount} users` : 'N/A';
+        let epNum = rawTitle;
+        const m = rawTitle.match(/\d+/);
+        if (m) epNum = parseInt(m[0]);
 
-        // Synopsis
-        const paragraphs = [];
-        $('.desc p, .entry-content p').each((i, el) => {
-            if ($(el).text().trim()) paragraphs.push($(el).text().trim());
+        episodes.push({
+            title: epNum,
+            episodeId: epId,
+            href: `/samehadaku/episode/${epId}`,
+            samehadakuUrl: href
         });
+    });
 
-        // Episodes
-        const episodes = [];
-        $('.lstepsiode li').each((i, el) => {
-            const a = $(el).find('a');
-            const href = a.attr('href');
-            const epId = extractId(href);
-            const rawTitle = $(el).find('.epl-title').text().trim() || a.text().trim();
-            
-            // Ambil angka episode
-            let epNum = rawTitle;
-            const mEp = rawTitle.match(/\d+/);
-            if (mEp) epNum = parseInt(mEp[0]);
+    const genreList = parseGenreList($, $('.genre-info'));
 
-            episodes.push({
-                title: epNum,
-                episodeId: epId,
-                href: `/samehadaku/episode/${epId}`,
-                samehadakuUrl: href
-            });
-        });
+    const respData = {
+        title,
+        poster,
+        score: { value: scoreVal, users },
+        japanese: infos['japanese'] || '-', synonyms: infos['synonyms'] || '-', english: infos['english'] || '-',
+        status: infos['status'] || 'Unknown', type: infos['type'] || 'TV', source: infos['source'] || '-',
+        duration: infos['duration'] || '-', episodes: parseInt(infos['total episode']) || null,
+        season: infos['season'] || '-', studios: infos['studio'] || '-', producers: infos['producers'] || '-',
+        aired: infos['released'] || '-', trailer: $('.trailer-anime iframe').attr('src') || "",
+        synopsis: { paragraphs, connections: [] },
+        genreList,
+        batchList: [],
+        episodeList: episodes
+    };
 
-        const genreList = parseGenreList($, $('.genre-info'));
-
-        const respData = {
-            title,
-            poster,
-            score: { value: scoreVal, users },
-            japanese: infos['japanese'] || '-',
-            synonyms: infos['synonyms'] || '-',
-            english: infos['english'] || '-',
-            status: infos['status'] || 'Unknown',
-            type: infos['type'] || 'TV',
-            source: infos['source'] || '-',
-            duration: infos['duration'] || '-',
-            episodes: parseInt(infos['total episode']) || null,
-            season: infos['season'] || '-',
-            studios: infos['studio'] || '-',
-            producers: infos['producers'] || '-',
-            aired: infos['released'] || '-',
-            trailer: $('.trailer-anime iframe').attr('src') || "",
-            synopsis: { paragraphs, connections: [] },
-            genreList,
-            batchList: [],
-            episodeList: episodes
-        };
-
-        res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: respData, pagination: null });
-
-    } catch (e) { res.status(404).json({ status: "failed", message: "Not found" }); }
+    res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: respData, pagination: null });
 });
 
-// 5. EPISODE STREAM & DOWNLOAD
+// 5. EPISODE
 app.get('/anime/samehadaku/episode/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { data } = await axios.get(`${BASE_URL}/${id}/`, { headers: HEADERS });
-        const $ = cheerio.load(data);
+    const $ = await fetchPage(`${BASE_URL}/${req.params.id}/`);
+    if (!$) return res.status(404).json({ status: "failed", message: "Not found or Blocked" });
 
-        const title = $('h1.entry-title').text().trim();
-        const streamUrl = $('iframe').attr('src') || "";
-        
-        const prevHref = $('.prev').attr('href');
-        const nextHref = $('.next').attr('href');
-        
-        const nav = {
-            prev: (prevHref && !prevHref.includes('/anime/')) ? `/samehadaku/episode/${extractId(prevHref)}` : null,
-            next: (nextHref && !nextHref.includes('/anime/')) ? `/samehadaku/episode/${extractId(nextHref)}` : null
-        };
-
-        const downloads = [];
-        const dlBox = $('.download-eps, #server');
-        if (dlBox.length) {
-            dlBox.find('ul').each((i, ul) => {
-                // Find Header (MP4/MKV)
-                let format = "Unknown";
-                let prev = $(ul).prev();
-                // Loop mundur sampai ketemu header text
-                while(prev.length && !['p', 'h4', 'div', 'span'].includes(prev.prop('tagName').toLowerCase())) {
-                    prev = prev.prev();
-                }
-                if (prev.length) format = prev.text().trim();
-
-                // Normalisasi nama format
-                if (/MKV/i.test(format)) format = 'MKV';
-                else if (/MP4/i.test(format)) format = 'MP4';
-                else if (/x265/i.test(format)) format = 'x265';
-
-                const qualities = [];
-                $(ul).find('li').each((j, li) => {
-                    const qName = $(li).find('strong, b').text().trim();
-                    const urls = [];
-                    $(li).find('a').each((k, a) => {
-                        urls.push({ title: $(a).text().trim(), url: $(a).attr('href') });
-                    });
-                    qualities.push({ title: qName, urls });
-                });
-                if (qualities.length) downloads.push({ title: format, qualities });
-            });
+    const title = $('h1.entry-title').text().trim();
+    const iframe = $('iframe').attr('src') || "";
+    
+    const prev = $('.prev').attr('href');
+    const next = $('.next').attr('href');
+    
+    const downloads = [];
+    $('.download-eps ul, #server ul').each((i, ul) => {
+        let format = "Unknown";
+        let p = $(ul).prev();
+        while(p.length && !['p', 'h4', 'div', 'span'].includes(p.prop('tagName').toLowerCase())) {
+            p = p.prev();
         }
+        if(p.length) format = p.text().trim();
 
-        res.json({
-            status: "success", creator: "Sanka Vollerei", message: "",
-            data: { title, streamUrl, navigation: nav, downloads }
+        if (/MKV/i.test(format)) format = 'MKV';
+        else if (/MP4/i.test(format)) format = 'MP4';
+        else if (/x265/i.test(format)) format = 'x265';
+
+        const qualities = [];
+        $(ul).find('li').each((j, li) => {
+            const q = $(li).find('strong, b').text().trim();
+            const urls = [];
+            $(li).find('a').each((k, a) => urls.push({ title: $(a).text().trim(), url: $(a).attr('href') }));
+            qualities.push({ title: q, urls });
         });
-    } catch (e) { res.status(404).json({ status: "failed" }); }
+        if(qualities.length) downloads.push({ title: format, qualities });
+    });
+
+    res.json({
+        status: "success", creator: "Sanka Vollerei", message: "",
+        data: {
+            title, streamUrl: iframe,
+            navigation: {
+                prev: (prev && !prev.includes('/anime/')) ? `/samehadaku/episode/${extractId(prev)}` : null,
+                next: (next && !next.includes('/anime/')) ? `/samehadaku/episode/${extractId(next)}` : null
+            },
+            downloads
+        }
+    });
 });
 
-// 6. GENRES & BATCH & MOVIES (Standard Lists)
-const standardListHandler = (urlFn) => createListHandler(urlFn, parseLibraryItem);
-
+// 6. GENRES & BATCH & MOVIES
 app.get('/anime/samehadaku/genres', async (req, res) => {
-    try {
-        const { data } = await axios.get(BASE_URL, { headers: HEADERS });
-        const $ = cheerio.load(data);
-        const list = [];
-        const seen = new Set();
-        $('a[href*="/genre/"]').each((i, el) => {
-            const href = $(el).attr('href');
-            if (!seen.has(href)) {
-                list.push({ title: $(el).text().split('(')[0].trim(), genreId: extractId(href), href: `/samehadaku/genres/${extractId(href)}`, samehadakuUrl: href });
+    const $ = await fetchPage(BASE_URL);
+    if (!$) return res.status(500).json({ status: "failed" });
+
+    const list = [];
+    const seen = new Set();
+    $('a[href*="/genre/"]').each((i, el) => {
+        const href = $(el).attr('href');
+        if (!seen.has(href)) {
+            const id = extractId(href);
+            if (id) {
+                list.push({ title: $(el).text().split('(')[0].trim(), genreId: id, href: `/samehadaku/genres/${id}`, samehadakuUrl: href });
                 seen.add(href);
             }
-        });
-        list.sort((a, b) => a.title.localeCompare(b.title));
-        res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: { genreList: list } });
-    } catch(e) { res.status(500).json({ status: "failed" }); }
+        }
+    });
+    list.sort((a, b) => a.title.localeCompare(b.title));
+    res.json({ status: "success", creator: "Sanka Vollerei", message: "", data: { genreList: list } });
 });
 
 app.get('/anime/samehadaku/genres/:id', createListHandler(
@@ -478,7 +454,6 @@ app.get('/anime/samehadaku/movies', createListHandler(
     ($, el) => { const i = parseLibraryItem($, el); if(i) i.type = "Movie"; return i; }
 ));
 
-// START SERVER
 const PORT = process.env.PORT || 3000;
 if (require.main === module) {
     app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
