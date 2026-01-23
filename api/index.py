@@ -1,10 +1,20 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware  # <-- TAMBAH INI!
 from fastapi.responses import JSONResponse
 import requests
 from bs4 import BeautifulSoup
 import re
 
 app = FastAPI(title="Samehadaku API V30 - Python Perfect (Schedule Fixed Proper)")
+
+# ========== TAMBAHKAN INI ==========
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://stream-pi-seven.vercel.app"],  # Untuk development, ganti "*" dengan domain spesifik di production
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
