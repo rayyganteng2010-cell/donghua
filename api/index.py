@@ -10,7 +10,7 @@ app = FastAPI(title="Samehadaku API V30 - Python Perfect (Schedule Fixed Proper)
 # ========== TAMBAHKAN INI ==========
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://raystream.wuaze.com/"],  # Untuk development, ganti "*" dengan domain spesifik di production
+    allow_origins=["https://raystream.wuaze.com"],  # Untuk development, ganti "*" dengan domain spesifik di production
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
